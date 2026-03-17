@@ -165,7 +165,13 @@ def get_vacant_guest_rooms_by_hall(hall):
 
 def count_vacant_rooms_by_hall_and_type(hall_id: int, room_type: str) -> int:
     """Count vacant rooms of a specific type in a hall."""
-    return GuestRoom.objects.filter(hall_id=hall_id, room_type=room_type, vacant=True).count()
+    count = GuestRoom.objects.filter(hall_id=hall_id, room_type=room_type, vacant=True).count()
+    # Debug: Log the query results
+    import logging
+    logger = logging.getLogger(__name__)
+    logger.debug(f"Counting vacant rooms: hall_id={hall_id}, room_type={room_type}, count={count}")
+    logger.debug(f"All guest rooms for this hall: {GuestRoom.objects.filter(hall_id=hall_id).values('id', 'room_type', 'vacant')}")
+    return count
 
 
 # ══════════════════════════════════════════════════════════════
@@ -511,3 +517,66 @@ def get_user_by_username(username: str):
 def user_exists_by_username(username: str) -> bool:
     """Check if user exists by username."""
     return User.objects.filter(username=username).exists()
+
+
+# ══════════════════════════════════════════════════════════════
+# USER ROLE SELECTORS
+# ══════════════════════════════════════════════════════════════
+
+def get_user_hostel_role(user: User):
+    """
+    Determine the hostel role for a user.
+    Returns: 'caretaker', 'warden', 'student', or None
+    """
+    try:
+        extra_info = user.extrainfo
+        
+        # Check if user is a caretaker
+        if extra_info.user_type == 'staff':
+            caretaker = HallCaretaker.objects.filter(staff__id=extra_info).select_related('hall').first()
+            if caretaker:
+                return {
+                    'role': 'caretaker',
+                    'hall': caretaker.hall.hall_id if caretaker.hall else None,
+                    'hall_name': caretaker.hall.hall_name if caretaker.hall else None
+                }
+        
+        # Check if user is a warden
+        if extra_info.user_type == 'faculty':
+            warden = HallWarden.objects.filter(faculty__id=extra_info).select_related('hall').first()
+            if warden:
+                return {
+                    'role': 'warden',
+                    'hall': warden.hall.hall_id if warden.hall else None,
+                    'hall_name': warden.hall.hall_name if warden.hall else None
+                }
+        
+        # Check if user is a student
+        if extra_info.user_type == 'student':
+            return {
+                'role': 'student',
+                'hall': None,
+                'hall_name': None
+            }
+        
+        return None
+    except Exception:
+        return None
+
+
+def is_user_caretaker(user: User) -> bool:
+    """Check if user is a hostel caretaker."""
+    role_info = get_user_hostel_role(user)
+    return role_info is not None and role_info.get('role') == 'caretaker'
+
+
+def is_user_warden(user: User) -> bool:
+    """Check if user is a hostel warden."""
+    role_info = get_user_hostel_role(user)
+    return role_info is not None and role_info.get('role') == 'warden'
+
+
+def is_user_student(user: User) -> bool:
+    """Check if user is a student."""
+    role_info = get_user_hostel_role(user)
+    return role_info is not None and role_info.get('role') == 'student'

@@ -575,3 +575,18 @@ def list_hostel_history(request):
     history = selectors.get_all_hostel_history()
     serializer = HostelHistorySerializer(history, many=True)
     return Response(serializer.data, status=status.HTTP_200_OK)
+
+
+# ══════════════════════════════════════════════════════════════
+# USER ROLE ENDPOINT
+# ══════════════════════════════════════════════════════════════
+
+@api_view(['GET'])
+@authentication_classes([SessionAuthentication, TokenAuthentication])
+@permission_classes([IsAuthenticated])
+def get_user_role(request):
+    """Get the hostel role for the current user."""
+    role_info = selectors.get_user_hostel_role(request.user)
+    if role_info:
+        return Response(role_info, status=status.HTTP_200_OK)
+    return Response({"role": None, "hall": None, "hall_name": None}, status=status.HTTP_200_OK)

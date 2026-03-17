@@ -441,6 +441,43 @@ def reject_guest_room_booking(*, booking_id: int):
     return booking
 
 
+@transaction.atomic
+def bulk_create_guest_rooms(*, hall_id: int, rooms: list):
+    """Create multiple guest rooms for a hall.
+    
+    Args:
+        hall_id: Hall database ID
+        rooms: List of dicts with keys: 'room' (name), 'room_type' ('single'/'double'/'triple')
+    
+    Example:
+        bulk_create_guest_rooms(
+            hall_id=1,
+            rooms=[
+                {'room': 'G101', 'room_type': 'single'},
+                {'room': 'G102', 'room_type': 'double'},
+                {'room': 'G103', 'room_type': 'triple'},
+            ]
+        )
+    """
+    try:
+        hall = selectors.get_hall_by_id(hall_id)
+    except Hall.DoesNotExist:
+        raise HallNotFoundError(f"Hall with ID {hall_id} not found.")
+    
+    guest_rooms = []
+    for room_data in rooms:
+        guest_room = GuestRoom(
+            hall=hall,
+            room=room_data['room'],
+            room_type=room_data.get('room_type', 'single'),
+            vacant=True
+        )
+        guest_rooms.append(guest_room)
+    
+    created_rooms = GuestRoom.objects.bulk_create(guest_rooms)
+    return created_rooms
+
+
 # ══════════════════════════════════════════════════════════════
 # STAFF SCHEDULE SERVICES
 # ══════════════════════════════════════════════════════════════
@@ -601,8 +638,8 @@ def create_leave_application(
     student_name: str,
     roll_num: str,
     reason: str,
-    start_date: str,
-    end_date: str,
+    start_date,  # Accepts date object or string
+    end_date,    # Accepts date object or string
     phone_number: str = None,
     file_upload=None
 ):

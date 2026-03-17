@@ -95,4 +95,9 @@ urlpatterns = [
     # ══════════════════════════════════════════════════════════════
     path('history/transactions/', views.list_transaction_history, name='list-transaction-history'),
     path('history/hostel/', views.list_hostel_history, name='list-hostel-history'),
+
+    # ══════════════════════════════════════════════════════════════
+    # USER ROLE ENDPOINT
+    # ══════════════════════════════════════════════════════════════
+    path('user/role/', views.get_user_role, name='get-user-role'),
 ]
