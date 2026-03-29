@@ -1,0 +1,203 @@
+Watching for file changes with StatReloader
+[23/Mar/2026 09:46:44] "GET / HTTP/1.1" 200 22524
+[23/Mar/2026 09:46:44] "GET /static/semantic/dist/components/reset.css HTTP/1.1" 200 7060
+[23/Mar/2026 09:46:44] "GET /static/semantic/dist/components/icon.css HTTP/1.1" 200 122346
+[23/Mar/2026 09:46:44] "GET /static/globals/css/semantic.min.css HTTP/1.1" 200 561460
+[23/Mar/2026 09:46:44] "GET /static/globals/css/mediaquery.css HTTP/1.1" 200 993
+[23/Mar/2026 09:46:44] "GET /static/globals/css/semantic-notify.css HTTP/1.1" 200 567
+[23/Mar/2026 09:46:44] "GET /static/globals/css/disable_anchors.css HTTP/1.1" 200 96
+[23/Mar/2026 09:46:44] "GET /static/semantic/dist/components/site.css HTTP/1.1" 200 3850
+[23/Mar/2026 09:46:44] "GET /static/debug_toolbar/css/toolbar.css HTTP/1.1" 200 11479
+[23/Mar/2026 09:46:44] "GET /static/globals/js/jquery.formset.js HTTP/1.1" 200 12734
+[23/Mar/2026 09:46:44] "GET /static/globals/js/jquery.min.js HTTP/1.1" 200 86600
+[23/Mar/2026 09:46:44] "GET /static/globals/js/dropdown.js HTTP/1.1" 200 120
+[23/Mar/2026 09:46:44] "GET /static/globals/js/tab.js HTTP/1.1" 200 79
+[23/Mar/2026 09:46:44] "GET /static/globals/js/semantic.min.js HTTP/1.1" 200 277529
+[23/Mar/2026 09:46:44] "GET /static/globals/js/semantic-notify.js HTTP/1.1" 200 1917
+[23/Mar/2026 09:46:44] "GET /static/globals/js/ajax-post.js HTTP/1.1" 200 860
+[23/Mar/2026 09:46:44] "GET /static/globals/js/notify.js HTTP/1.1" 200 2547
+[23/Mar/2026 09:46:44] "GET /static/globals/js/sidebar.js HTTP/1.1" 200 34503
+[23/Mar/2026 09:46:44] "GET /static/globals/js/transition.js HTTP/1.1" 200 36070
+[23/Mar/2026 09:46:44] "GET /static/globals/js/visibility.js HTTP/1.1" 200 44153
+[23/Mar/2026 09:46:44] "GET /static/debug_toolbar/js/toolbar.js HTTP/1.1" 200 11275
+[23/Mar/2026 09:46:46] "GET /static/debug_toolbar/css/print.css HTTP/1.1" 200 43
+[23/Mar/2026 09:46:46] "GET /static/debug_toolbar/js/utils.js HTTP/1.1" 200 3531
+[23/Mar/2026 09:46:46] "GET /static/globals/img/LHTC.jpg HTTP/1.1" 200 848143
+[23/Mar/2026 09:46:46] "GET /static/globals/css/themes/default/assets/fonts/icons.woff2 HTTP/1.1" 200 77160
+[23/Mar/2026 09:46:46] "GET /static/globals/img/zlatan.jpg HTTP/1.1" 200 3105
+[23/Mar/2026 09:46:46] "GET /static/globals/img/fusion.png HTTP/1.1" 200 112529
+[23/Mar/2026 09:47:17] "GET /accounts/login HTTP/1.1" 301 0
+[23/Mar/2026 09:47:19] "GET /accounts/login/ HTTP/1.1" 200 17138
+[23/Mar/2026 09:47:19] "GET /static/globals/css/mediaquery.css HTTP/1.1" 304 0
+[23/Mar/2026 09:47:19] "GET /static/semantic/dist/components/icon.css HTTP/1.1" 304 0
+[23/Mar/2026 09:47:19] "GET /static/globals/js/jquery.formset.js HTTP/1.1" 304 0
+[23/Mar/2026 09:47:19] "GET /static/semantic/dist/components/reset.css HTTP/1.1" 304 0
+[23/Mar/2026 09:47:19] "GET /static/globals/css/semantic-notify.css HTTP/1.1" 304 0
+[23/Mar/2026 09:47:19] "GET /static/globals/css/semantic.min.css HTTP/1.1" 304 0
+[23/Mar/2026 09:47:19] "GET /static/globals/css/disable_anchors.css HTTP/1.1" 304 0
+[23/Mar/2026 09:47:19] "GET /static/globals/js/semantic.min.js HTTP/1.1" 304 0
+[23/Mar/2026 09:47:19] "GET /static/globals/js/dropdown.js HTTP/1.1" 304 0
+[23/Mar/2026 09:47:19] "GET /static/globals/js/notify.js HTTP/1.1" 304 0
+[23/Mar/2026 09:47:19] "GET /static/globals/js/tab.js HTTP/1.1" 304 0
+[23/Mar/2026 09:47:19] "GET /static/globals/js/jquery.min.js HTTP/1.1" 304 0
+[23/Mar/2026 09:47:19] "GET /static/globals/js/semantic-notify.js HTTP/1.1" 304 0
+[23/Mar/2026 09:47:19] "GET /static/globals/js/ajax-post.js HTTP/1.1" 304 0
+[23/Mar/2026 09:47:19] "GET /static/debug_toolbar/js/toolbar.js HTTP/1.1" 304 0
+[23/Mar/2026 09:47:19] "GET /static/debug_toolbar/css/toolbar.css HTTP/1.1" 304 0
+[23/Mar/2026 09:47:19] "GET /static/globals/img/user.png HTTP/1.1" 200 41156
+[23/Mar/2026 09:47:19] "GET /static/debug_toolbar/css/print.css HTTP/1.1" 304 0
+[23/Mar/2026 09:47:19] "GET /static/globals/img/LHTC.jpg HTTP/1.1" 304 0
+[23/Mar/2026 09:47:19] "GET /static/debug_toolbar/js/utils.js HTTP/1.1" 304 0
+[23/Mar/2026 09:47:19] "GET /static/globals/css/themes/default/assets/fonts/icons.woff2 HTTP/1.1" 304 0
+[23/Mar/2026 09:47:19] "GET /static/globals/img/zlatan.jpg HTTP/1.1" 304 0
+[23/Mar/2026 09:47:36] "POST /accounts/login/ HTTP/1.1" 200 17466
+[23/Mar/2026 09:47:36] "GET /static/semantic/dist/components/reset.css HTTP/1.1" 304 0
+[23/Mar/2026 09:47:36] "GET /static/globals/css/semantic.min.css HTTP/1.1" 304 0
+[23/Mar/2026 09:47:36] "GET /static/globals/css/mediaquery.css HTTP/1.1" 304 0
+[23/Mar/2026 09:47:36] "GET /static/semantic/dist/components/icon.css HTTP/1.1" 304 0
+[23/Mar/2026 09:47:36] "GET /static/globals/js/jquery.formset.js HTTP/1.1" 304 0
+[23/Mar/2026 09:47:36] "GET /static/globals/js/dropdown.js HTTP/1.1" 304 0
+[23/Mar/2026 09:47:36] "GET /static/globals/js/jquery.min.js HTTP/1.1" 304 0
+[23/Mar/2026 09:47:36] "GET /static/globals/css/disable_anchors.css HTTP/1.1" 304 0
+[23/Mar/2026 09:47:36] "GET /static/globals/css/semantic-notify.css HTTP/1.1" 304 0
+[23/Mar/2026 09:47:36] "GET /static/globals/js/semantic.min.js HTTP/1.1" 304 0
+[23/Mar/2026 09:47:36] "GET /static/globals/js/semantic-notify.js HTTP/1.1" 304 0
+[23/Mar/2026 09:47:36] "GET /static/globals/js/notify.js HTTP/1.1" 304 0
+[23/Mar/2026 09:47:36] "GET /static/debug_toolbar/js/toolbar.js HTTP/1.1" 304 0
+[23/Mar/2026 09:47:36] "GET /static/globals/js/tab.js HTTP/1.1" 304 0
+[23/Mar/2026 09:47:36] "GET /static/debug_toolbar/css/toolbar.css HTTP/1.1" 304 0
+[23/Mar/2026 09:47:36] "GET /static/globals/img/user.png HTTP/1.1" 304 0
+[23/Mar/2026 09:47:36] "GET /static/globals/js/ajax-post.js HTTP/1.1" 304 0
+[23/Mar/2026 09:47:36] "GET /static/debug_toolbar/css/print.css HTTP/1.1" 304 0
+[23/Mar/2026 09:47:36] "GET /static/debug_toolbar/js/utils.js HTTP/1.1" 304 0
+[23/Mar/2026 09:47:36] "GET /static/globals/img/LHTC.jpg HTTP/1.1" 304 0
+[23/Mar/2026 09:47:36] "GET /static/globals/css/themes/default/assets/fonts/icons.woff2 HTTP/1.1" 304 0
+[23/Mar/2026 09:47:36] "GET /static/globals/img/zlatan.jpg HTTP/1.1" 304 0
+Unauthorized: /api/hostel/halls/
+[23/Mar/2026 09:49:34] "GET /api/hostel/halls/ HTTP/1.1" 401 27
+[23/Mar/2026 09:59:05] "GET /api/notification/ HTTP/1.1" 200 20
+[23/Mar/2026 09:59:05] "GET /api/auth/me HTTP/1.1" 200 544
+[23/Mar/2026 09:59:06] "GET /api/notification/ HTTP/1.1" 200 20
+[23/Mar/2026 09:59:07] "GET /api/notification/ HTTP/1.1" 200 20
+[23/Mar/2026 09:59:07] "GET /api/auth/me HTTP/1.1" 200 544
+[23/Mar/2026 09:59:07] "GET /api/notification/ HTTP/1.1" 200 20
+[23/Mar/2026 09:59:08] "GET /api/auth/me HTTP/1.1" 200 544
+[23/Mar/2026 09:59:08] "GET /api/auth/me HTTP/1.1" 200 544
+[23/Mar/2026 09:59:09] "GET /api/auth/me HTTP/1.1" 200 544
+[23/Mar/2026 09:59:10] "GET /api/auth/me HTTP/1.1" 200 544
+----------------------------------------
+Exception happened during processing of request from ('127.0.0.1', 54787)
+Traceback (most recent call last):
+  File "/Users/chaitanyakumar/.pyenv/versions/3.8.18/lib/python3.8/socketserver.py", line 683, in process_request_thread
+    self.finish_request(request, client_address)
+  File "/Users/chaitanyakumar/.pyenv/versions/3.8.18/lib/python3.8/socketserver.py", line 360, in finish_request
+    self.RequestHandlerClass(request, client_address, self)
+  File "/Users/chaitanyakumar/.pyenv/versions/3.8.18/lib/python3.8/socketserver.py", line 747, in __init__
+    self.handle()
+  File "/Users/chaitanyakumar/Desktop/fusion ai/Fusion/env/lib/python3.8/site-packages/django/core/servers/basehttp.py", line 174, in handle
+    self.handle_one_request()
+  File "/Users/chaitanyakumar/Desktop/fusion ai/Fusion/env/lib/python3.8/site-packages/django/core/servers/basehttp.py", line 182, in handle_one_request
+    self.raw_requestline = self.rfile.readline(65537)
+  File "/Users/chaitanyakumar/.pyenv/versions/3.8.18/lib/python3.8/socket.py", line 669, in readinto
+    return self._sock.recv_into(b)
+ConnectionResetError: [Errno 54] Connection reset by peer
+----------------------------------------
+[23/Mar/2026 09:59:40] "GET /api/hostel/fines/ HTTP/1.1" 200 2
+[23/Mar/2026 09:59:40] "GET /api/hostel/halls/ HTTP/1.1" 200 1789
+[23/Mar/2026 09:59:40] "GET /api/hostel/leaves/ HTTP/1.1" 200 2
+[23/Mar/2026 09:59:40] "GET /api/hostel/complaints/ HTTP/1.1" 200 2
+[23/Mar/2026 09:59:40] "GET /api/hostel/inventory/ HTTP/1.1" 200 2
+[23/Mar/2026 09:59:42] "GET /api/auth/me HTTP/1.1" 200 544
+[23/Mar/2026 09:59:43] "GET /api/hostel/fines/ HTTP/1.1" 200 2
+[23/Mar/2026 09:59:43] "GET /api/hostel/notices/ HTTP/1.1" 200 2
+[23/Mar/2026 09:59:43] "GET /api/hostel/halls/ HTTP/1.1" 200 1789
+[23/Mar/2026 09:59:43] "GET /api/notification/ HTTP/1.1" 200 20
+[23/Mar/2026 09:59:44] "GET /api/hostel/leaves/ HTTP/1.1" 200 2
+[23/Mar/2026 09:59:45] "GET /api/hostel/inventory/ HTTP/1.1" 200 2
+[23/Mar/2026 09:59:45] "GET /api/hostel/complaints/ HTTP/1.1" 200 2
+[23/Mar/2026 09:59:45] "GET /api/notification/ HTTP/1.1" 200 20
+[23/Mar/2026 09:59:45] "GET /api/hostel/notices/ HTTP/1.1" 200 2
+[23/Mar/2026 09:59:46] "GET /api/auth/me HTTP/1.1" 200 544
+[23/Mar/2026 09:59:46] "GET /api/auth/me HTTP/1.1" 200 544
+[23/Mar/2026 09:59:47] "GET /api/auth/me HTTP/1.1" 200 544
+Bad Request: /api/hostel/notices/
+[23/Mar/2026 10:08:49] "POST /api/hostel/notices/ HTTP/1.1" 400 59
+Internal Server Error: /api/hostel/halls/
+Traceback (most recent call last):
+  File "/Users/chaitanyakumar/Desktop/fusion ai/Fusion/env/lib/python3.8/site-packages/django/core/handlers/exception.py", line 47, in inner
+    response = get_response(request)
+  File "/Users/chaitanyakumar/Desktop/fusion ai/Fusion/env/lib/python3.8/site-packages/django/core/handlers/base.py", line 181, in _get_response
+    response = wrapped_callback(request, *callback_args, **callback_kwargs)
+  File "/Users/chaitanyakumar/Desktop/fusion ai/Fusion/env/lib/python3.8/site-packages/django/views/decorators/csrf.py", line 54, in wrapped_view
+    return view_func(*args, **kwargs)
+  File "/Users/chaitanyakumar/Desktop/fusion ai/Fusion/env/lib/python3.8/site-packages/django/views/generic/base.py", line 70, in view
+    return self.dispatch(request, *args, **kwargs)
+  File "/Users/chaitanyakumar/Desktop/fusion ai/Fusion/env/lib/python3.8/site-packages/rest_framework/views.py", line 509, in dispatch
+    response = self.handle_exception(exc)
+  File "/Users/chaitanyakumar/Desktop/fusion ai/Fusion/env/lib/python3.8/site-packages/rest_framework/views.py", line 469, in handle_exception
+    self.raise_uncaught_exception(exc)
+  File "/Users/chaitanyakumar/Desktop/fusion ai/Fusion/env/lib/python3.8/site-packages/rest_framework/views.py", line 480, in raise_uncaught_exception
+    raise exc
+  File "/Users/chaitanyakumar/Desktop/fusion ai/Fusion/env/lib/python3.8/site-packages/rest_framework/views.py", line 506, in dispatch
+    response = handler(request, *args, **kwargs)
+  File "/Users/chaitanyakumar/Desktop/fusion ai/Fusion/FusionIIIT/applications/hostel_management/api/views.py", line 63, in post
+    hall = services.create_hall(**serializer.validated_data)
+  File "/Users/chaitanyakumar/.pyenv/versions/3.8.18/lib/python3.8/contextlib.py", line 75, in inner
+    return func(*args, **kwds)
+TypeError: create_hall() got an unexpected keyword argument 'max_accomodation'
+[23/Mar/2026 10:11:01] "POST /api/hostel/halls/ HTTP/1.1" 500 118665
+[23/Mar/2026 10:19:42] "GET /api/hostel/halls/ HTTP/1.1" 200 1789
+[23/Mar/2026 10:19:42] "GET /api/hostel/fines/ HTTP/1.1" 200 2
+[23/Mar/2026 10:19:42] "GET /api/hostel/complaints/ HTTP/1.1" 200 2
+[23/Mar/2026 10:19:42] "GET /api/hostel/leaves/ HTTP/1.1" 200 2
+[23/Mar/2026 10:19:42] "GET /api/hostel/inventory/ HTTP/1.1" 200 2
+[23/Mar/2026 10:19:44] "GET /api/auth/me HTTP/1.1" 200 544
+[23/Mar/2026 10:19:44] "GET /api/hostel/complaints/ HTTP/1.1" 200 2
+[23/Mar/2026 10:19:44] "GET /api/hostel/halls/ HTTP/1.1" 200 1789
+[23/Mar/2026 10:19:44] "GET /api/hostel/notices/ HTTP/1.1" 200 2
+[23/Mar/2026 10:19:44] "GET /api/hostel/fines/ HTTP/1.1" 200 2
+[23/Mar/2026 10:19:44] "GET /api/hostel/leaves/ HTTP/1.1" 200 2
+[23/Mar/2026 10:19:46] "GET /api/hostel/inventory/ HTTP/1.1" 200 2
+[23/Mar/2026 10:19:46] "GET /api/hostel/notices/ HTTP/1.1" 200 2
+[23/Mar/2026 10:19:46] "GET /api/auth/me HTTP/1.1" 200 544
+[23/Mar/2026 10:19:46] "GET /api/notification/ HTTP/1.1" 200 20
+[23/Mar/2026 10:19:47] "GET /api/notification/ HTTP/1.1" 200 20
+[23/Mar/2026 10:19:47] "GET /api/auth/me HTTP/1.1" 200 544
+[23/Mar/2026 10:20:05] "POST /api/auth/logout/ HTTP/1.1" 200 42
+[23/Mar/2026 10:23:27] "POST /api/auth/login/ HTTP/1.1" 200 136
+[23/Mar/2026 10:23:28] "GET /api/notification/ HTTP/1.1" 200 20
+[23/Mar/2026 10:23:28] "GET /api/auth/me HTTP/1.1" 200 544
+[23/Mar/2026 10:23:29] "GET /api/notification/ HTTP/1.1" 200 20
+[23/Mar/2026 10:23:29] "GET /api/auth/me HTTP/1.1" 200 544
+[23/Mar/2026 10:23:36] "GET /api/auth/me HTTP/1.1" 200 544
+[23/Mar/2026 10:23:37] "GET /api/hostel/inventory/ HTTP/1.1" 200 2
+[23/Mar/2026 10:23:37] "GET /api/hostel/fines/ HTTP/1.1" 200 2
+[23/Mar/2026 10:23:37] "GET /api/hostel/leaves/ HTTP/1.1" 200 2
+[23/Mar/2026 10:23:38] "GET /api/hostel/halls/ HTTP/1.1" 200 1789
+[23/Mar/2026 10:23:38] "GET /api/hostel/complaints/ HTTP/1.1" 200 2
+[23/Mar/2026 10:23:38] "GET /api/hostel/notices/ HTTP/1.1" 200 2
+[23/Mar/2026 10:23:39] "GET /api/hostel/inventory/ HTTP/1.1" 200 2
+[23/Mar/2026 10:23:39] "GET /api/hostel/fines/ HTTP/1.1" 200 2
+[23/Mar/2026 10:23:39] "GET /api/hostel/leaves/ HTTP/1.1" 200 2
+[23/Mar/2026 10:23:39] "GET /api/hostel/halls/ HTTP/1.1" 200 1789
+[23/Mar/2026 10:23:40] "GET /api/hostel/complaints/ HTTP/1.1" 200 2
+[23/Mar/2026 10:23:40] "GET /api/auth/me HTTP/1.1" 200 544
+[23/Mar/2026 10:23:40] "GET /api/hostel/notices/ HTTP/1.1" 200 2
+Bad Request: /api/hostel/notices/
+[23/Mar/2026 10:23:58] "POST /api/hostel/notices/ HTTP/1.1" 400 59
+[23/Mar/2026 10:39:01] "POST /api/auth/logout/ HTTP/1.1" 200 42
+/Users/chaitanyakumar/Desktop/fusion ai/Fusion/FusionIIIT/applications/hostel_management/services.py changed, reloading.
+Performing system checks...
+
+URL patterns [<URLPattern 'projects'>, <URLPattern 'view_project_info/<id>/'>, <URLPattern 'view_project_inventory/<pj_id>/' [name='view_project_inventory']>, <URLPattern 'view_project_staff/<pj_id>/' [name='view_project_staff']>, <URLPattern 'view_financial_outlay/<pid>/' [name='view_financial_outlay']>, <URLPattern 'view_staff_details/<pid>/' [name='view_staff_details']>]
+System check identified no issues (0 silenced).
+March 23, 2026 - 09:43:10
+Django version 3.1.5, using settings 'Fusion.settings.development'
+Starting development server at http://0.0.0.0:8000/
+Quit the server with CONTROL-C.
+Watching for file changes with StatReloader
+[23/Mar/2026 17:45:10] "GET / HTTP/1.1" 200 22524
+Not Found: /hostelmanagement/api/halls/
+[23/Mar/2026 17:46:36] "GET /hostelmanagement/api/halls/ HTTP/1.1" 404 30669
+Forbidden: /api/hostel/halls/
+[23/Mar/2026 17:47:31] "GET /api/hostel/halls/ HTTP/1.1" 403 58

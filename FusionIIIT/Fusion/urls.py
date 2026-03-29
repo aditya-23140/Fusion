@@ -60,6 +60,7 @@ urlpatterns = [
     url(r'^ocms/', include('applications.online_cms.urls')),
     url(r'^counselling/', include('applications.counselling_cell.urls')),
     url(r'^hostelmanagement/', include('applications.hostel_management.urls')),
+    url(r'^api/hostel/', include('applications.hostel_management.api.urls')),
     url(r'^income-expenditure/', include('applications.income_expenditure.urls')),
     url(r'^hr2/', include('applications.hr2.urls')),
     url(r'^recruitment/', include('applications.recruitment.urls')),
