@@ -365,7 +365,6 @@ class HostelFine(models.Model):
     fine_id = models.AutoField(primary_key=True)
     student = models.ForeignKey(Student, on_delete=models.CASCADE)
     hall = models.ForeignKey(Hall, on_delete=models.CASCADE,default=1)
-    student_id_entered = models.CharField(max_length=20, null=True, blank=True, default="")
     student_name = models.CharField(max_length=100)
     amount = models.DecimalField(max_digits=10, decimal_places=2)
     STATUS_CHOICES = [
