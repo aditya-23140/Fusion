@@ -35,6 +35,34 @@ class HostelManagementConstants:
     ("Forward", 'Forward')
     )    
 
+# BookingStatus Enum for business logic and imports
+class BookingStatus:
+    PENDING = "Pending"
+    CONFIRMED = "Confirmed"
+    REJECTED = "Rejected"
+    CANCELED = "Canceled"
+    CANCEL_REQUESTED = "CancelRequested"
+    CHECKED_IN = "CheckedIn"
+    COMPLETE = "Complete"
+    FORWARD = "Forward"
+
+# LeaveStatus Enum for business logic and imports
+class LeaveStatus:
+    PENDING = "pending"
+    APPROVED = "approved"
+    REJECTED = "rejected"
+
+# FineStatus Enum for business logic and imports
+class FineStatus:
+    PENDING = "Pending"
+    PAID = "Paid"
+
+# RoomType Enum for business logic and imports
+class RoomType:
+    SINGLE = "single"
+    DOUBLE = "double"
+    TRIPLE = "triple"
+
 
 class Hall(models.Model):
     """
