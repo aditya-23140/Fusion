@@ -1,1167 +1,805 @@
 """
-Selectors - All database read operations for hostel management.
+Hostel Management Selectors
 
-This module contains ALL .objects. queries for the hostel management module.
-NO .objects. should appear anywhere else (especially not in views or services for reads).
+This module contains ALL database queries for the hostel_management app.
+NO queries are allowed in views or services.
+
+Query patterns:
+- get_*: Returns single object or None
+- list_*: Returns QuerySet for lists
+- filter_*: Returns QuerySet with specific filters
+- count_*: Returns count of objects
 """
 
-from django.db.models import Q, Count, F
-from django.contrib.auth.models import User
-from applications.globals.models import ExtraInfo, Staff, Faculty
-from applications.academic_information.models import Student
+from django.db.models import Q, Count, F, Sum
+from django.utils import timezone
+from datetime import timedelta
 
 from .models import (
-    Hall,
-    HallCaretaker,
-    HallWarden,
-    GuestRoomBooking,
-    StaffSchedule,
-    HostelNoticeBoard,
-    HostelStudentAttendence,
-    HallRoom,
-    WorkerReport,
-    HostelInventory,
-    HostelLeave,
-    HostelComplaint,
-    HostelAllotment,
-    StudentDetails,
-    GuestRoom,
-    HostelFine,
-    HostelTransactionHistory,
-    HostelHistory,
-    BookingStatus,
-    LeaveStatus,
-    FineStatus,
+    Hall, HallRoom, HallCaretaker, HallWarden,
+    HostelLeave, HostelComplaint, RoomAllocation, RoomAllocationChange,
+    HostelFine, StaffSchedule, HostelInventory,
+    HostelNoticeBoard, GuestRoom, GuestRoomBooking,
+    HostelTransactionHistory, HostelStudentAttendance, WorkerReport,
+    LeaveStatusChoices, ComplaintStatusChoices, RoomAllocationStatusChoices
 )
+from applications.academic_information.models import Student
+from applications.globals.models import Staff, Faculty
 
 
 # ══════════════════════════════════════════════════════════════
-# HALL SELECTORS
+# HALL & INFRASTRUCTURE QUERIES
 # ══════════════════════════════════════════════════════════════
+
+def get_hall_by_id(hall_id):
+    """Get a single hall by hall_id string."""
+    return Hall.objects.filter(hall_id=hall_id).first()
+
 
 def get_all_halls():
-    """Retrieve all halls ordered by hall_id."""
+    """Get all halls."""
     return Hall.objects.all().order_by('hall_id')
 
 
-def get_hall_by_id(hall_id: int):
-    """Retrieve a specific hall by its database ID."""
-    return Hall.objects.get(id=hall_id)
+def list_active_halls():
+    """Get all active halls."""
+    return Hall.objects.filter().order_by('hall_id')
 
 
-def get_hall_by_hall_id(hall_id: str):
-    """Retrieve a specific hall by its hall_id string."""
-    return Hall.objects.get(hall_id=hall_id)
+def get_hall_room(hall_id, room_number):
+    """Get a specific room in a hall."""
+    return HallRoom.objects.filter(
+        hall__hall_id=hall_id,
+        room_number=room_number
+    ).first()
 
 
-def hall_exists_by_hall_id(hall_id: str) -> bool:
-    """Check if a hall exists by hall_id."""
-    return Hall.objects.filter(hall_id=hall_id).exists()
+def get_hall_rooms(hall_id):
+    """Get all rooms in a hall."""
+    return HallRoom.objects.filter(hall__hall_id=hall_id).order_by('block_number', 'room_number')
 
 
-# ══════════════════════════════════════════════════════════════
-# HALL CARETAKER SELECTORS
-# ══════════════════════════════════════════════════════════════
-
-def get_all_hall_caretakers():
-    """Retrieve all hall caretakers with related data."""
-    return HallCaretaker.objects.all().select_related('hall', 'staff__id__user')
-
-
-def get_caretaker_by_hall(hall):
-    """Get caretaker for a specific hall."""
-    return HallCaretaker.objects.filter(hall=hall).select_related('staff__id__user').first()
+def list_available_rooms(hall_id):
+    """Get available rooms in a hall."""
+    return HallRoom.objects.filter(
+        hall__hall_id=hall_id,
+        status='available'
+    ).order_by('block_number', 'room_number')
 
 
-def get_caretaker_by_staff_id(staff_id):
-    """Get caretaker assignment by staff ID."""
-    return HallCaretaker.objects.filter(staff_id=staff_id).select_related('hall').first()
+def list_rooms_by_status(hall_id, status):
+    """Get rooms by status in a hall."""
+    return HallRoom.objects.filter(
+        hall__hall_id=hall_id,
+        status=status
+    )
 
 
-def get_hall_for_caretaker_user(user: User):
-    """Get the hall managed by a caretaker user."""
-    try:
-        staff_id = user.extrainfo.id
-        caretaker = HallCaretaker.objects.filter(staff_id=staff_id).select_related('hall').first()
-        return caretaker.hall if caretaker else None
-    except:
-        return None
+def get_hall_caretaker(hall_id):
+    """Get active caretaker for a hall."""
+    return HallCaretaker.objects.filter(
+        hall__hall_id=hall_id,
+        is_active=True
+    ).first()
 
 
-# ══════════════════════════════════════════════════════════════
-# HALL WARDEN SELECTORS
-# ══════════════════════════════════════════════════════════════
-
-def get_all_hall_wardens():
-    """Retrieve all hall wardens with related data."""
-    return HallWarden.objects.all().select_related('hall', 'faculty__id__user')
-
-
-def get_warden_by_hall(hall):
-    """Get warden for a specific hall."""
-    return HallWarden.objects.filter(hall=hall).select_related('faculty__id__user').first()
+def get_hall_warden(hall_id):
+    """Get active warden for a hall."""
+    return HallWarden.objects.filter(
+        hall__hall_id=hall_id,
+        is_active=True
+    ).first()
 
 
-def get_warden_by_faculty_id(faculty_id):
-    """Get warden assignment by faculty ID."""
-    return HallWarden.objects.filter(faculty_id=faculty_id).select_related('hall').first()
+def list_hall_caretakers(hall_id):
+    """Get all caretakers (active and inactive) for a hall."""
+    return HallCaretaker.objects.filter(
+        hall__hall_id=hall_id
+    ).order_by('-is_active', '-assigned_date')
 
 
-def get_hall_for_warden_user(user: User):
-    """Get the hall managed by a warden user."""
-    try:
-        faculty_id = user.extrainfo.id
-        warden = HallWarden.objects.filter(faculty_id=faculty_id).select_related('hall').first()
-        return warden.hall if warden else None
-    except:
-        return None
+def list_hall_wardens(hall_id):
+    """Get all wardens (active and inactive) for a hall."""
+    return HallWarden.objects.filter(
+        hall__hall_id=hall_id
+    ).order_by('-is_active', '-assigned_date')
 
 
 # ══════════════════════════════════════════════════════════════
-# GUEST ROOM BOOKING SELECTORS
+# STUDENT & USER QUERIES
 # ══════════════════════════════════════════════════════════════
 
-def get_all_guest_room_bookings():
-    """Retrieve all guest room bookings."""
-    return GuestRoomBooking.objects.all().select_related('hall', 'intender').order_by('-booking_date')
+def get_student(user_id):
+    """Get a student by their user ID."""
+    return Student.objects.filter(id__user_id=user_id).first()
 
 
-def get_booking_by_id(booking_id: int):
-    """Retrieve a specific booking by ID."""
-    return GuestRoomBooking.objects.select_related('hall', 'intender').get(id=booking_id)
-
-
-def get_pending_bookings_by_hall(hall):
-    """Get all pending guest room bookings for a hall."""
-    return GuestRoomBooking.objects.filter(
-        hall=hall,
-        status=BookingStatus.PENDING
-    ).select_related('hall', 'intender')
-
-
-def get_bookings_by_user(user: User):
-    """Get all bookings made by a specific user."""
-    return GuestRoomBooking.objects.filter(intender=user).select_related('hall').order_by('-arrival_date')
+def list_students_by_academic_batch(batch_id):
+    """Get all students belonging to a specific academic batch (for bulk allocation)."""
+    return Student.objects.filter(
+        batch_id=batch_id
+    ).select_related(
+        'id__user',
+        'batch_id__discipline'
+    ).order_by('id__user__username')
 
 
 # ══════════════════════════════════════════════════════════════
-# GUEST ROOM SELECTORS
+# HM-WF-101: LEAVE QUERIES
 # ══════════════════════════════════════════════════════════════
 
-def get_all_guest_rooms():
-    """Retrieve all guest rooms."""
-    return GuestRoom.objects.all().select_related('hall')
+def get_student_leave(leave_id):
+    """Get a specific leave record."""
+    return HostelLeave.objects.filter(id=leave_id).first()
 
 
-def get_guest_room_by_id(room_id: int):
-    """Retrieve a specific guest room by ID."""
-    return GuestRoom.objects.select_related('hall').get(id=room_id)
+def get_student_current_leave(student_id, start_date, end_date):
+    """Check if student has overlapping leave in date range."""
+    return HostelLeave.objects.filter(
+        student_id=student_id,
+        status=LeaveStatusChoices.APPROVED,
+        start_date__lt=end_date,
+        end_date__gte=start_date
+    ).first()
 
 
-def get_vacant_guest_rooms_by_hall(hall):
-    """Get all vacant guest rooms for a specific hall."""
-    return GuestRoom.objects.filter(hall=hall, vacant=True).select_related('hall')
+def list_student_leaves(student_id):
+    """Get all leaves for a student."""
+    return HostelLeave.objects.filter(
+        student_id=student_id
+    ).order_by('-created_at')
 
 
-def count_vacant_rooms_by_hall_and_type(hall_id: int, room_type: str) -> int:
-    """Count vacant rooms of a specific type in a hall."""
-    count = GuestRoom.objects.filter(hall_id=hall_id, room_type=room_type, vacant=True).count()
-    # Debug: Log the query results
-    import logging
-    logger = logging.getLogger(__name__)
-    logger.debug(f"Counting vacant rooms: hall_id={hall_id}, room_type={room_type}, count={count}")
-    logger.debug(f"All guest rooms for this hall: {GuestRoom.objects.filter(hall_id=hall_id).values('id', 'room_type', 'vacant')}")
-    return count
+def list_pending_leaves():
+    """Get all pending leaves."""
+    return HostelLeave.objects.filter(
+        status=LeaveStatusChoices.PENDING
+    ).order_by('-created_at')
 
 
-# ══════════════════════════════════════════════════════════════
-# STAFF SCHEDULE SELECTORS
-# ══════════════════════════════════════════════════════════════
-
-def get_all_staff_schedules():
-    """Retrieve all staff schedules."""
-    return StaffSchedule.objects.all().select_related('hall', 'staff_id__id__user')
-
-
-def get_staff_schedule_by_hall(hall):
-    """Get all staff schedules for a specific hall."""
-    return StaffSchedule.objects.filter(hall=hall).select_related('staff_id__id__user')
+def list_pending_leaves_by_hall(hall_id):
+    """Get pending leaves for students in a specific hall."""
+    from .models import RoomAllocationStatusChoices
+    return HostelLeave.objects.filter(
+        status=LeaveStatusChoices.PENDING,
+        student__room_allocations__status=RoomAllocationStatusChoices.ALLOCATED
+    ).distinct().order_by('-created_at')
 
 
-def get_staff_schedule_by_id(schedule_id: int):
-    """Get a specific staff schedule by ID."""
-    return StaffSchedule.objects.select_related('hall', 'staff_id__id__user').get(id=schedule_id)
+def count_student_approved_leaves(student_id, year=None):
+    """Count approved leaves for a student in a year."""
+    query = HostelLeave.objects.filter(
+        student_id=student_id,
+        status=LeaveStatusChoices.APPROVED
+    )
+    if year:
+        query = query.filter(start_date__year=year)
+    return query.count()
 
 
-def get_schedule_by_staff_id(staff_id):
-    """Get schedule for a specific staff member."""
-    return StaffSchedule.objects.filter(staff_id=staff_id).select_related('hall').first()
+def list_student_leaves_by_status(student_id, status):
+    """Get leaves for a student by status."""
+    return HostelLeave.objects.filter(
+        student_id=student_id,
+        status=status
+    ).order_by('-created_at')
 
 
-# ══════════════════════════════════════════════════════════════
-# NOTICE BOARD SELECTORS
-# ══════════════════════════════════════════════════════════════
-
-def get_all_notices():
-    """Retrieve all hostel notices, latest first."""
-    return HostelNoticeBoard.objects.all().select_related('hall', 'posted_by__user').order_by('-id')
-
-
-def get_notice_by_id(notice_id: int):
-    """Retrieve a specific notice by ID."""
-    return HostelNoticeBoard.objects.select_related('hall', 'posted_by__user').get(id=notice_id)
-
-
-def get_notices_by_hall(hall):
-    """Get all notices for a specific hall."""
-    return HostelNoticeBoard.objects.filter(hall=hall).select_related('hall', 'posted_by__user').order_by('-id')
+def list_leaves_requiring_attendance_update(start_date, end_date):
+    """Get approved leaves in date range requiring attendance marking."""
+    return HostelLeave.objects.filter(
+        status=LeaveStatusChoices.APPROVED,
+        start_date__lte=end_date,
+        end_date__gte=start_date
+    )
 
 
 # ══════════════════════════════════════════════════════════════
-# STUDENT ATTENDANCE SELECTORS
+# HM-WF-102: COMPLAINT QUERIES
 # ══════════════════════════════════════════════════════════════
 
-def get_all_attendance():
-    """Retrieve all student attendance records."""
-    return HostelStudentAttendence.objects.all().select_related('hall', 'student_id__id__user')
+def get_complaint(complaint_id):
+    """Get a specific complaint."""
+    return HostelComplaint.objects.filter(id=complaint_id).first()
 
 
-def get_attendance_by_hall(hall):
-    """Get all attendance records for a specific hall."""
-    return HostelStudentAttendence.objects.filter(hall=hall).select_related('student_id__id__user')
+def list_student_complaints(student_id):
+    """Get all complaints from a student."""
+    return HostelComplaint.objects.filter(
+        student_id=student_id
+    ).order_by('-created_at')
 
 
-def get_attendance_by_student_and_date(student, date):
-    """Check if attendance exists for a student on a specific date."""
-    return HostelStudentAttendence.objects.filter(student_id=student, date=date).first()
+def list_open_complaints():
+    """Get all open complaints."""
+    return HostelComplaint.objects.filter(
+        status=ComplaintStatusChoices.OPEN
+    ).order_by('-created_at')
 
 
-def attendance_exists(student, date) -> bool:
-    """Check if attendance record exists."""
-    return HostelStudentAttendence.objects.filter(student_id=student, date=date).exists()
+def list_complaints_by_status(status):
+    """Get complaints by status."""
+    return HostelComplaint.objects.filter(
+        status=status
+    ).order_by('-created_at')
 
 
-# ══════════════════════════════════════════════════════════════
-# HALL ROOM SELECTORS
-# ══════════════════════════════════════════════════════════════
-
-def get_all_hall_rooms():
-    """Retrieve all hall rooms."""
-    return HallRoom.objects.all().select_related('hall')
+def list_complaints_by_category(category):
+    """Get complaints by category."""
+    return HostelComplaint.objects.filter(
+        category=category
+    ).order_by('-created_at')
 
 
-def get_rooms_by_hall(hall):
-    """Get all rooms for a specific hall."""
-    return HallRoom.objects.filter(hall=hall)
+def list_complaints_by_hall(hall_id):
+    """Get complaints in a specific hall."""
+    return HostelComplaint.objects.filter(
+        hall__hall_id=hall_id
+    ).order_by('-created_at')
 
 
-def get_room_by_id(room_id: int):
-    """Retrieve a specific room by ID."""
-    return HallRoom.objects.select_related('hall').get(id=room_id)
+def list_complaints_assigned_to_staff(staff_id):
+    """Get complaints assigned to a staff member."""
+    return HostelComplaint.objects.filter(
+        assigned_to_id=staff_id
+    ).exclude(status=ComplaintStatusChoices.CLOSED).order_by('-created_at')
 
 
-def get_available_rooms_by_hall(hall):
-    """Get all available rooms (not at full capacity) for a specific hall."""
-    return HallRoom.objects.filter(hall=hall).filter(room_cap__gt=F('room_occupied'))
+def list_escalated_complaints():
+    """Get complaints escalated to warden."""
+    return HostelComplaint.objects.filter(
+        escalated_to_warden=True
+    ).order_by('-created_at')
 
 
-def get_room_by_details(hall, block_no: str, room_no: str):
-    """Get a specific room by hall, block and room number."""
-    return HallRoom.objects.filter(hall=hall, block_no=block_no, room_no=room_no).first()
+def list_escalated_complaints_for_warden(faculty_id):
+    """Get escalated complaints assigned to a warden."""
+    return HostelComplaint.objects.filter(
+        escalated_to_warden=True,
+        warden_assigned_id=faculty_id
+    ).exclude(status=ComplaintStatusChoices.CLOSED).order_by('-created_at')
 
 
-def get_allotted_rooms_by_hall(hall):
-    """Get all rooms with at least one occupant."""
-    return HallRoom.objects.filter(hall=hall, room_occupied__gt=0)
+def count_open_complaints_for_student(student_id):
+    """Count open complaints for a student."""
+    return HostelComplaint.objects.filter(
+        student_id=student_id,
+        status__in=[ComplaintStatusChoices.OPEN, ComplaintStatusChoices.IN_PROGRESS]
+    ).count()
 
 
-# ══════════════════════════════════════════════════════════════
-# WORKER REPORT SELECTORS
-# ══════════════════════════════════════════════════════════════
-
-def get_all_worker_reports():
-    """Retrieve all worker reports."""
-    return WorkerReport.objects.all().select_related('hall')
+def list_complaints_by_priority(priority):
+    """Get complaints by priority level."""
+    return HostelComplaint.objects.filter(
+        priority=priority
+    ).order_by('-created_at')
 
 
-def get_worker_reports_by_hall(hall):
-    """Get all worker reports for a specific hall."""
-    return WorkerReport.objects.filter(hall=hall)
-
-
-def get_worker_reports_by_hall_and_period(hall, year: int, month: int):
-    """Get worker reports for a specific hall and time period."""
-    return WorkerReport.objects.filter(hall=hall, year=year, month=month)
-
-
-# ══════════════════════════════════════════════════════════════
-# HOSTEL INVENTORY SELECTORS
-# ══════════════════════════════════════════════════════════════
-
-def get_all_inventory():
-    """Retrieve all hostel inventory items."""
-    return HostelInventory.objects.all().select_related('hall').order_by('inventory_id')
-
-
-def get_inventory_by_id(inventory_id: int):
-    """Retrieve a specific inventory item by ID."""
-    return HostelInventory.objects.select_related('hall').get(inventory_id=inventory_id)
-
-
-def get_inventory_by_hall(hall_id: int):
-    """Get all inventory items for a specific hall."""
-    return HostelInventory.objects.filter(hall_id=hall_id).order_by('inventory_id')
+def list_high_priority_open_complaints():
+    """Get high priority and critical open complaints."""
+    from .models import ComplaintPriorityChoices
+    return HostelComplaint.objects.filter(
+        status=ComplaintStatusChoices.OPEN,
+        priority__in=[ComplaintPriorityChoices.HIGH, ComplaintPriorityChoices.CRITICAL]
+    ).order_by('-created_at')
 
 
 # ══════════════════════════════════════════════════════════════
-# LEAVE SELECTORS
+# HM-WF-103 & HM-WF-104: ROOM ALLOCATION QUERIES
 # ══════════════════════════════════════════════════════════════
 
-def get_all_leaves():
-    """Retrieve all hostel leave applications."""
-    return HostelLeave.objects.all().order_by('-start_date')
+def get_student_current_allocation(student_id):
+    """Get student's current active room allocation."""
+    return RoomAllocation.objects.filter(
+        student_id=student_id,
+        status=RoomAllocationStatusChoices.ALLOCATED
+    ).first()
 
 
-def get_leave_by_id(leave_id: int):
-    """Retrieve a specific leave application by ID."""
-    return HostelLeave.objects.get(id=leave_id)
+def get_allocation_by_id(allocation_id):
+    """Get a specific room allocation."""
+    return RoomAllocation.objects.filter(id=allocation_id).first()
 
 
-def get_leaves_by_roll_number(roll_num: str):
-    """Get all leave applications for a specific student."""
-    return HostelLeave.objects.filter(roll_num__iexact=roll_num).order_by('-start_date')
+def list_student_allocations(student_id):
+    """Get all room allocations for a student."""
+    return RoomAllocation.objects.filter(
+        student_id=student_id
+    ).order_by('-allocation_date')
 
 
-def get_pending_leaves():
-    """Get all pending leave applications."""
-    return HostelLeave.objects.filter(status=LeaveStatus.PENDING).order_by('-start_date')
+def list_allocations_in_room(room_id):
+    """Get all allocations in a specific room."""
+    return RoomAllocation.objects.filter(
+        room_id=room_id
+    ).order_by('-allocation_date')
 
 
-# ══════════════════════════════════════════════════════════════
-# COMPLAINT SELECTORS
-# ══════════════════════════════════════════════════════════════
-
-def get_all_complaints():
-    """Retrieve all hostel complaints."""
-    return HostelComplaint.objects.all()
+def list_allocations_by_status(status):
+    """Get allocations by status."""
+    return RoomAllocation.objects.filter(
+        status=status
+    ).order_by('-allocation_date')
 
 
-def get_complaint_by_id(complaint_id: int):
-    """Retrieve a specific complaint by ID."""
-    return HostelComplaint.objects.get(id=complaint_id)
+def count_occupied_seats_in_room(room_id):
+    """Count occupied seats in a room."""
+    return RoomAllocation.objects.filter(
+        room_id=room_id,
+        status=RoomAllocationStatusChoices.ALLOCATED
+    ).count()
 
 
-def get_complaints_by_roll_number(roll_number: str):
-    """Get all complaints filed by a specific student."""
-    return HostelComplaint.objects.filter(roll_number=roll_number)
+def list_unallocated_students():
+    """Get students without current room allocation."""
+    return Student.objects.exclude(
+        room_allocations__status=RoomAllocationStatusChoices.ALLOCATED
+    )
 
 
-# ══════════════════════════════════════════════════════════════
-# HOSTEL ALLOTMENT SELECTORS
-# ══════════════════════════════════════════════════════════════
-
-def get_all_allotments():
-    """Retrieve all hostel allotments."""
-    return HostelAllotment.objects.all().select_related('hall', 'assignedCaretaker__id__user', 'assignedWarden__id__user')
-
-
-def get_allotment_by_id(allotment_id: int):
-    """Retrieve a specific allotment by ID."""
-    return HostelAllotment.objects.select_related('hall', 'assignedCaretaker', 'assignedWarden').get(id=allotment_id)
+def get_all_allocations():
+    """Get all room allocations with optimized queries."""
+    return RoomAllocation.objects.select_related(
+        'student__id__user',
+        'room__hall',
+        'hall',
+        'allocated_by__id__user'
+    ).order_by('student_id')
 
 
-def get_allotments_by_hall(hall):
-    """Get all allotments for a specific hall."""
-    return HostelAllotment.objects.filter(hall=hall).select_related('assignedCaretaker', 'assignedWarden')
+def get_student_allocations(user):
+    """Get all room allocations for a student user with optimized queries."""
+    student = get_student(user.id)
+    if not student:
+        return RoomAllocation.objects.none()
+    return RoomAllocation.objects.filter(
+        student_id=student.pk
+    ).select_related(
+        'student__id__user',
+        'room__hall',
+        'hall',
+        'allocated_by__id__user'
+    ).order_by('student_id')
 
 
-# ══════════════════════════════════════════════════════════════
-# STUDENT DETAILS SELECTORS
-# ══════════════════════════════════════════════════════════════
-
-def get_all_student_details():
-    """Retrieve all student details."""
-    return StudentDetails.objects.all()
-
-
-def get_student_details_by_id(student_id: str):
-    """Retrieve student details by ID."""
-    return StudentDetails.objects.get(id=student_id)
-
-
-def get_student_details_by_hall_id(hall_id: str):
-    """Get all student details for a specific hall."""
-    return StudentDetails.objects.filter(hall_id=hall_id)
-
-
-# ══════════════════════════════════════════════════════════════
-# STUDENT SELECTORS (from globals)
-# ══════════════════════════════════════════════════════════════
-
-def get_all_students():
-    """Retrieve all students."""
-    return Student.objects.all().select_related('id__user')
-
-
-def get_student_by_id(student_id: str):
-    """Retrieve a specific student by ID."""
-    return Student.objects.select_related('id__user').get(id=student_id)
-
-
-def get_students_by_hall_no(hall_no: int):
-    """Get all students in a specific hall."""
-    return Student.objects.filter(hall_no=hall_no).select_related('id__user')
-
-
-def student_exists(student_id: str) -> bool:
-    """Check if a student exists."""
-    return Student.objects.filter(id_id=student_id).exists()
+def get_allocations_by_hall(hall_id):
+    """Get all room allocations in a specific hall with optimized queries."""
+    return RoomAllocation.objects.filter(
+        hall_id=hall_id
+    ).select_related(
+        'student__id__user',
+        'room__hall',
+        'hall',
+        'allocated_by__id__user'
+    ).order_by('student_id')
 
 
 # ══════════════════════════════════════════════════════════════
-# HOSTEL FINE SELECTORS
+# HM-WF-104: ROOM CHANGE QUERIES
 # ══════════════════════════════════════════════════════════════
 
-def get_all_fines():
-    """Retrieve all hostel fines."""
-    return HostelFine.objects.all().select_related('student__id__user', 'hall').order_by('fine_id')
+def list_room_changes_by_student(student_id):
+    """Get all room change requests for a student."""
+    return RoomAllocationChange.objects.filter(
+        student_id=student_id
+    ).order_by('-requested_date')
 
 
-def get_fine_by_id(fine_id: int):
-    """Retrieve a specific fine by ID."""
-    return HostelFine.objects.select_related('student__id__user', 'hall').get(fine_id=fine_id)
+def get_room_change(change_id):
+    """Get a specific room change request."""
+    return RoomAllocationChange.objects.filter(id=change_id).first()
 
 
-def get_fines_by_hall(hall_id: int):
-    """Get all fines for a specific hall."""
-    return HostelFine.objects.filter(hall_id=hall_id).select_related('student__id__user').order_by('fine_id')
+def list_pending_room_changes():
+    """Get all pending room change requests."""
+    from .models import AllocationChangeStatusChoices
+    return RoomAllocationChange.objects.filter(
+        status=AllocationChangeStatusChoices.REQUESTED
+    ).order_by('-requested_date')
 
 
-def get_fines_by_student(student_id: str):
-    """Get all fines for a specific student - check both student FK and entered student_id."""
-    from django.db.models import Q
+def list_room_changes_by_status(status):
+    """Get room changes by status."""
+    return RoomAllocationChange.objects.filter(
+        status=status
+    ).order_by('-requested_date')
+
+
+def list_room_changes_for_warden(faculty_id):
+    """Get room changes pending warden approval."""
+    from .models import AllocationChangeStatusChoices
+    return RoomAllocationChange.objects.filter(
+        status=AllocationChangeStatusChoices.REQUESTED
+    ).select_related('student', 'current_room', 'requested_room').order_by('-requested_date')
+
+
+def list_room_changes_for_caretaker(staff_id):
+    """Get room changes pending caretaker approval."""
+    from .models import AllocationChangeStatusChoices
+    return RoomAllocationChange.objects.filter(
+        status=AllocationChangeStatusChoices.APPROVED_WARDEN
+    ).select_related('student', 'current_room', 'requested_room').order_by('-requested_date')
+
+
+def get_all_room_changes():
+    """Get all room changes."""
+    return RoomAllocationChange.objects.all().order_by('-requested_date')
+
+
+def get_student_room_changes(user):
+    """Get all room changes for a student user."""
+    student = get_student(user.id)
+    if not student:
+        return RoomAllocationChange.objects.none()
+    return list_room_changes_by_student(student.pk)
+
+
+# ══════════════════════════════════════════════════════════════
+# HM-WF-105: FINE QUERIES
+# ══════════════════════════════════════════════════════════════
+
+def get_fine(fine_id):
+    """Get a specific fine record."""
+    return HostelFine.objects.filter(id=fine_id).first()
+
+
+def list_student_fines(student_id):
+    """Get all fines for a student."""
     return HostelFine.objects.filter(
-        Q(student__id__id=student_id) | Q(student_id_entered=student_id)
-    ).select_related('hall').order_by('fine_id')
+        student_id=student_id
+    ).order_by('-issued_date')
 
 
-def get_pending_fines_by_student(student_id: str):
-    """Get all pending fines for a specific student."""
-    return HostelFine.objects.filter(student_id=student_id, status=FineStatus.PENDING).order_by('fine_id')
+def list_student_pending_fines(student_id):
+    """Get unpaid fines for a student."""
+    from .models import FineStatusChoices
+    return HostelFine.objects.filter(
+        student_id=student_id,
+        status=FineStatusChoices.PENDING
+    ).order_by('-due_date')
 
 
-# ══════════════════════════════════════════════════════════════
-# HISTORY SELECTORS
-# ══════════════════════════════════════════════════════════════
-
-def get_all_transaction_history():
-    """Retrieve all transaction history."""
-    return HostelTransactionHistory.objects.all().select_related('hall').order_by('-timestamp')
-
-
-def get_transaction_history_by_hall(hall):
-    """Get transaction history for a specific hall."""
-    return HostelTransactionHistory.objects.filter(hall=hall).order_by('-timestamp')
+def list_pending_fines():
+    """Get all pending fines."""
+    from .models import FineStatusChoices
+    return HostelFine.objects.filter(
+        status=FineStatusChoices.PENDING
+    ).order_by('-due_date')
 
 
-def get_all_hostel_history():
-    """Retrieve all hostel history."""
-    return HostelHistory.objects.all().select_related('hall', 'caretaker__id__user', 'warden__id__user').order_by('-timestamp')
+def list_overdue_fines():
+    """Get overdue fines (past due date and still pending)."""
+    from .models import FineStatusChoices
+    return HostelFine.objects.filter(
+        status=FineStatusChoices.PENDING,
+        due_date__lt=timezone.now().date()
+    ).order_by('-due_date')
 
 
-def get_hostel_history_by_hall(hall):
-    """Get hostel history for a specific hall."""
-    return HostelHistory.objects.filter(hall=hall).select_related('caretaker__id__user', 'warden__id__user').order_by('-timestamp')
+def list_fines_by_type(fine_type):
+    """Get fines by type."""
+    return HostelFine.objects.filter(
+        fine_type=fine_type
+    ).order_by('-issued_date')
 
 
-# ══════════════════════════════════════════════════════════════
-# STAFF & FACULTY SELECTORS (from globals)
-# ══════════════════════════════════════════════════════════════
-
-def get_all_staff():
-    """Retrieve all staff members."""
-    return Staff.objects.all().select_related('id__user')
+def list_fines_by_hall(hall_id):
+    """Get all fines issued in a hall."""
+    return HostelFine.objects.filter(
+        hall__hall_id=hall_id
+    ).order_by('-issued_date')
 
 
-def get_staff_by_id(staff_id):
-    """Retrieve a specific staff member by ID."""
-    return Staff.objects.select_related('id__user').get(pk=staff_id)
+def sum_student_fines(student_id, status=None):
+    """Get total fine amount for a student."""
+    from .models import FineStatusChoices
+    query = HostelFine.objects.filter(student_id=student_id)
+    if status:
+        query = query.filter(status=status)
+    else:
+        query = query.exclude(status=FineStatusChoices.CANCELLED)
+    result = query.aggregate(total=Sum('amount'))
+    return result['total'] or 0
 
 
-def get_staff_by_username(username: str):
-    """Get staff member by username."""
-    return Staff.objects.select_related('id__user').get(id__user__username=username)
+def count_student_unpaid_fines(student_id):
+    """Count unpaid fines for a student."""
+    from .models import FineStatusChoices
+    return HostelFine.objects.filter(
+        student_id=student_id,
+        status=FineStatusChoices.PENDING
+    ).count()
 
 
-def get_all_faculty():
-    """Retrieve all faculty members."""
-    return Faculty.objects.all().select_related('id__user')
-
-
-def get_faculty_by_id(faculty_id):
-    """Retrieve a specific faculty member by ID."""
-    return Faculty.objects.select_related('id__user').get(pk=faculty_id)
-
-
-def get_faculty_by_username(username: str):
-    """Get faculty member by username."""
-    return Faculty.objects.select_related('id__user').get(id__user__username=username)
-
-
-# ══════════════════════════════════════════════════════════════
-# USER SELECTORS
-# ══════════════════════════════════════════════════════════════
-
-def get_user_by_username(username: str):
-    """Get user by username."""
-    return User.objects.get(username=username)
-
-
-def user_exists_by_username(username: str) -> bool:
-    """Check if user exists by username."""
-    return User.objects.filter(username=username).exists()
+def list_fines_issued_by_staff(staff_id):
+    """Get fines issued by a specific staff member."""
+    return HostelFine.objects.filter(
+        issued_by_id=staff_id
+    ).order_by('-issued_date')
 
 
 # ══════════════════════════════════════════════════════════════
-# USER ROLE SELECTORS
+# HM-WF-107: STAFF SCHEDULE QUERIES
 # ══════════════════════════════════════════════════════════════
 
-def get_user_hostel_role(user: User):
-    """
-    Determine the hostel role for a user.
-    Returns: 'caretaker', 'warden', 'student', or None
-    """
-    try:
-        extra_info = user.extrainfo
-        
-        # Check if user is a caretaker
-        if extra_info.user_type == 'staff':
-            caretaker = HallCaretaker.objects.filter(staff__id=extra_info).select_related('hall').first()
-            if caretaker:
-                return {
-                    'role': 'caretaker',
-                    'hall': caretaker.hall.hall_id if caretaker.hall else None,
-                    'hall_name': caretaker.hall.hall_name if caretaker.hall else None
-                }
-        
-        # Check if user is a warden
-        if extra_info.user_type == 'faculty':
-            warden = HallWarden.objects.filter(faculty__id=extra_info).select_related('hall').first()
-            if warden:
-                return {
-                    'role': 'warden',
-                    'hall': warden.hall.hall_id if warden.hall else None,
-                    'hall_name': warden.hall.hall_name if warden.hall else None
-                }
-        
-        # Check if user is a student
-        if extra_info.user_type == 'student':
-            return {
-                'role': 'student',
-                'hall': None,
-                'hall_name': None
-            }
-        
-        return None
-    except Exception:
-        return None
+def get_staff_schedule(schedule_id):
+    """Get a specific staff schedule."""
+    return StaffSchedule.objects.filter(id=schedule_id).first()
 
 
-def is_user_caretaker(user: User) -> bool:
-    """Check if user is a hostel caretaker."""
-    role_info = get_user_hostel_role(user)
-    return role_info is not None and role_info.get('role') == 'caretaker'
+def list_hall_schedules(hall_id):
+    """Get all schedules for a hall."""
+    return StaffSchedule.objects.filter(
+        hall__hall_id=hall_id
+    ).order_by('day_of_week', 'start_time')
 
 
-def is_user_warden(user: User) -> bool:
-    """Check if user is a hostel warden."""
-    role_info = get_user_hostel_role(user)
-    return role_info is not None and role_info.get('role') == 'warden'
+def list_staff_schedules(staff_id):
+    """Get all schedules for a staff member."""
+    return StaffSchedule.objects.filter(
+        staff_id=staff_id
+    ).order_by('day_of_week', 'start_time')
 
 
-def is_user_student(user: User) -> bool:
-    """Check if user is a student."""
-    role_info = get_user_hostel_role(user)
-    return role_info is not None and role_info.get('role') == 'student'
-"""
-Selectors - All database read operations for hostel management.
+def get_staff_schedule_by_day(hall_id, staff_id, day):
+    """Get staff schedule for a specific day in a hall."""
+    return StaffSchedule.objects.filter(
+        hall__hall_id=hall_id,
+        staff_id=staff_id,
+        day_of_week=day
+    ).first()
 
-This module contains ALL .objects. queries for the hostel management module.
-NO .objects. should appear anywhere else (especially not in views or services for reads).
-"""
 
-from django.db.models import Q, Count, F
-from django.contrib.auth.models import User
-from applications.globals.models import ExtraInfo, Staff, Faculty
-from applications.academic_information.models import Student
-
-from .models import (
-    Hall,
-    HallCaretaker,
-    HallWarden,
-    GuestRoomBooking,
-    StaffSchedule,
-    HostelNoticeBoard,
-    HostelStudentAttendence,
-    HallRoom,
-    WorkerReport,
-    HostelInventory,
-    HostelLeave,
-    HostelComplaint,
-    HostelAllotment,
-    StudentDetails,
-    GuestRoom,
-    HostelFine,
-    HostelTransactionHistory,
-    HostelHistory,
-    BookingStatus,
-    LeaveStatus,
-    FineStatus,
-)
+def list_schedules_by_day(hall_id, day):
+    """Get all schedules for a specific day in a hall."""
+    return StaffSchedule.objects.filter(
+        hall__hall_id=hall_id,
+        day_of_week=day
+    ).order_by('start_time')
 
 
 # ══════════════════════════════════════════════════════════════
-# HALL SELECTORS
+# HM-WF-108: INVENTORY QUERIES
 # ══════════════════════════════════════════════════════════════
 
-def get_all_halls():
-    """Retrieve all halls ordered by hall_id."""
-    return Hall.objects.all().order_by('hall_id')
+def get_inventory_item(inventory_id):
+    """Get a specific inventory item."""
+    return HostelInventory.objects.filter(id=inventory_id).first()
 
 
-def get_hall_by_id(hall_id: int):
-    """Retrieve a specific hall by its database ID."""
-    return Hall.objects.get(id=hall_id)
+def list_hall_inventory(hall_id):
+    """Get all inventory for a hall."""
+    return HostelInventory.objects.filter(
+        hall__hall_id=hall_id
+    ).order_by('item_name')
 
 
-def get_hall_by_hall_id(hall_id: str):
-    """Retrieve a specific hall by its hall_id string."""
-    return Hall.objects.get(hall_id=hall_id)
+def get_inventory_by_name(hall_id, item_name):
+    """Get inventory item by name in a hall."""
+    return HostelInventory.objects.filter(
+        hall__hall_id=hall_id,
+        item_name=item_name
+    ).first()
 
 
-def hall_exists_by_hall_id(hall_id: str) -> bool:
-    """Check if a hall exists by hall_id."""
-    return Hall.objects.filter(hall_id=hall_id).exists()
+def list_low_stock_inventory(hall_id, threshold=5):
+    """Get inventory items below threshold."""
+    return HostelInventory.objects.filter(
+        hall__hall_id=hall_id,
+        quantity__lt=threshold
+    ).order_by('quantity')
 
 
-# ══════════════════════════════════════════════════════════════
-# HALL CARETAKER SELECTORS
-# ══════════════════════════════════════════════════════════════
-
-def get_all_hall_caretakers():
-    """Retrieve all hall caretakers with related data."""
-    return HallCaretaker.objects.all().select_related('hall', 'staff__id__user')
-
-
-def get_caretaker_by_hall(hall):
-    """Get caretaker for a specific hall."""
-    return HallCaretaker.objects.filter(hall=hall).select_related('staff__id__user').first()
+def list_student_fines_by_status(student_id, status):
+    """Get student fines filtered by status."""
+    return HostelFine.objects.filter(
+        student_id=student_id,
+        status=status
+    ).order_by('-issued_date')
 
 
-def get_caretaker_by_staff_id(staff_id):
-    """Get caretaker assignment by staff ID."""
-    return HallCaretaker.objects.filter(staff_id=staff_id).select_related('hall').first()
-
-
-def get_hall_for_caretaker_user(user: User):
-    """Get the hall managed by a caretaker user."""
-    try:
-        staff_id = user.extrainfo.id
-        caretaker = HallCaretaker.objects.filter(staff_id=staff_id).select_related('hall').first()
-        return caretaker.hall if caretaker else None
-    except:
-        return None
+def get_student_complaints_by_status(student_id, statuses):
+    """Get student complaints filtered by list of statuses."""
+    return HostelComplaint.objects.filter(
+        student_id=student_id,
+        status__in=statuses
+    ).order_by('-created_at')
 
 
 # ══════════════════════════════════════════════════════════════
-# HALL WARDEN SELECTORS
+# HM-WF-110: NOTICE BOARD QUERIES
 # ══════════════════════════════════════════════════════════════
 
-def get_all_hall_wardens():
-    """Retrieve all hall wardens with related data."""
-    return HallWarden.objects.all().select_related('hall', 'faculty__id__user')
+def get_notice(notice_id):
+    """Get a specific notice."""
+    return HostelNoticeBoard.objects.filter(id=notice_id).first()
 
 
-def get_warden_by_hall(hall):
-    """Get warden for a specific hall."""
-    return HallWarden.objects.filter(hall=hall).select_related('faculty__id__user').first()
+def list_active_notices(hall_id):
+    """Get all active notices for a hall."""
+    return HostelNoticeBoard.objects.filter(
+        hall__hall_id=hall_id,
+        is_active=True
+    ).order_by('-posted_date')
 
 
-def get_warden_by_faculty_id(faculty_id):
-    """Get warden assignment by faculty ID."""
-    return HallWarden.objects.filter(faculty_id=faculty_id).select_related('hall').first()
+def list_all_notices(hall_id):
+    """Get all notices (active and archived) for a hall."""
+    return HostelNoticeBoard.objects.filter(
+        hall__hall_id=hall_id
+    ).order_by('-posted_date')
 
 
-def get_hall_for_warden_user(user: User):
-    """Get the hall managed by a warden user."""
-    try:
-        faculty_id = user.extrainfo.id
-        warden = HallWarden.objects.filter(faculty_id=faculty_id).select_related('hall').first()
-        return warden.hall if warden else None
-    except:
-        return None
+def list_notices_by_poster(user_id):
+    """Get notices posted by a user."""
+    return HostelNoticeBoard.objects.filter(
+        posted_by_id=user_id
+    ).order_by('-posted_date')
 
 
 # ══════════════════════════════════════════════════════════════
-# GUEST ROOM BOOKING SELECTORS
+# HM-WF-112: GUEST ROOM QUERIES
 # ══════════════════════════════════════════════════════════════
 
-def get_all_guest_room_bookings():
-    """Retrieve all guest room bookings."""
-    return GuestRoomBooking.objects.all().select_related('hall', 'intender').order_by('-booking_date')
+def get_guest_room(room_id):
+    """Get a specific guest room."""
+    return GuestRoom.objects.filter(id=room_id).first()
 
 
-def get_booking_by_id(booking_id: int):
-    """Retrieve a specific booking by ID."""
-    return GuestRoomBooking.objects.select_related('hall', 'intender').get(id=booking_id)
+def list_hall_guest_rooms(hall_id):
+    """Get all guest rooms in a hall."""
+    return GuestRoom.objects.filter(
+        hall__hall_id=hall_id
+    ).order_by('room_number')
 
 
-def get_pending_bookings_by_hall(hall):
-    """Get all pending guest room bookings for a hall."""
+def list_available_guest_rooms(hall_id):
+    """Get available guest rooms in a hall."""
+    return GuestRoom.objects.filter(
+        hall__hall_id=hall_id,
+        status='available'
+    ).order_by('room_number')
+
+
+def get_guest_booking(booking_id):
+    """Get a specific guest room booking."""
+    return GuestRoomBooking.objects.filter(id=booking_id).first()
+
+
+def list_student_guest_bookings(student_id):
+    """Get all guest room bookings for a student."""
     return GuestRoomBooking.objects.filter(
-        hall=hall,
-        status=BookingStatus.PENDING
-    ).select_related('hall', 'intender')
+        student_id=student_id
+    ).order_by('-created_at')
 
 
-def get_bookings_by_user(user: User):
-    """Get all bookings made by a specific user."""
-    return GuestRoomBooking.objects.filter(intender=user).select_related('hall').order_by('-arrival_date')
+def list_pending_guest_bookings():
+    """Get all pending guest room bookings."""
+    from .models import GuestRoomBookingStatusChoices
+    return GuestRoomBooking.objects.filter(
+        status=GuestRoomBookingStatusChoices.PENDING
+    ).order_by('-created_at')
 
 
-# ══════════════════════════════════════════════════════════════
-# GUEST ROOM SELECTORS
-# ══════════════════════════════════════════════════════════════
-
-def get_all_guest_rooms():
-    """Retrieve all guest rooms."""
-    return GuestRoom.objects.all().select_related('hall')
+def list_guest_bookings_by_status(status):
+    """Get guest bookings by status."""
+    return GuestRoomBooking.objects.filter(
+        status=status
+    ).order_by('-created_at')
 
 
-def get_guest_room_by_id(room_id: int):
-    """Retrieve a specific guest room by ID."""
-    return GuestRoom.objects.select_related('hall').get(id=room_id)
+def list_checked_in_guest_bookings():
+    """Get all currently checked-in guest bookings."""
+    from .models import GuestRoomBookingStatusChoices
+    return GuestRoomBooking.objects.filter(
+        status=GuestRoomBookingStatusChoices.CHECKED_IN
+    ).order_by('-arrival_date')
 
 
-def get_vacant_guest_rooms_by_hall(hall):
-    """Get all vacant guest rooms for a specific hall."""
-    return GuestRoom.objects.filter(hall=hall, vacant=True).select_related('hall')
+def list_upcoming_guest_arrivals(days=7):
+    """Get guest bookings arriving within X days."""
+    from .models import GuestRoomBookingStatusChoices
+    today = timezone.now().date()
+    upcoming = today + timedelta(days=days)
+    return GuestRoomBooking.objects.filter(
+        status=GuestRoomBookingStatusChoices.CONFIRMED,
+        arrival_date__range=[today, upcoming]
+    ).order_by('arrival_date')
 
 
-def count_vacant_rooms_by_hall_and_type(hall_id: int, room_type: str) -> int:
-    """Count vacant rooms of a specific type in a hall."""
-    count = GuestRoom.objects.filter(hall_id=hall_id, room_type=room_type, vacant=True).count()
-    # Debug: Log the query results
-    import logging
-    logger = logging.getLogger(__name__)
-    logger.debug(f"Counting vacant rooms: hall_id={hall_id}, room_type={room_type}, count={count}")
-    logger.debug(f"All guest rooms for this hall: {GuestRoom.objects.filter(hall_id=hall_id).values('id', 'room_type', 'vacant')}")
-    return count
+def get_all_guest_bookings():
+    """Get all guest room bookings (for staff)."""
+    return GuestRoomBooking.objects.all().order_by('-created_at')
 
 
-# ══════════════════════════════════════════════════════════════
-# STAFF SCHEDULE SELECTORS
-# ══════════════════════════════════════════════════════════════
-
-def get_all_staff_schedules():
-    """Retrieve all staff schedules."""
-    return StaffSchedule.objects.all().select_related('hall', 'staff_id__id__user')
-
-
-def get_staff_schedule_by_hall(hall):
-    """Get all staff schedules for a specific hall."""
-    return StaffSchedule.objects.filter(hall=hall).select_related('staff_id__id__user')
-
-
-def get_staff_schedule_by_id(schedule_id: int):
-    """Get a specific staff schedule by ID."""
-    return StaffSchedule.objects.select_related('hall', 'staff_id__id__user').get(id=schedule_id)
-
-
-def get_schedule_by_staff_id(staff_id):
-    """Get schedule for a specific staff member."""
-    return StaffSchedule.objects.filter(staff_id=staff_id).select_related('hall').first()
+def get_student_guest_bookings(user):
+    """Get all guest room bookings for a student user."""
+    return GuestRoomBooking.objects.filter(
+        student_id=user.id
+    ).order_by('-created_at')
 
 
 # ══════════════════════════════════════════════════════════════
-# NOTICE BOARD SELECTORS
+# ATTENDANCE & TRANSACTION TRACKING QUERIES
 # ══════════════════════════════════════════════════════════════
 
-def get_all_notices():
-    """Retrieve all hostel notices, latest first."""
-    return HostelNoticeBoard.objects.all().select_related('hall', 'posted_by__user').order_by('-id')
+def get_attendance_record(attendance_id):
+    """Get a specific attendance record."""
+    return HostelStudentAttendance.objects.filter(id=attendance_id).first()
 
 
-def get_notice_by_id(notice_id: int):
-    """Retrieve a specific notice by ID."""
-    return HostelNoticeBoard.objects.select_related('hall', 'posted_by__user').get(id=notice_id)
+def list_student_attendance(student_id, days=30):
+    """Get attendance records for a student in last X days."""
+    start_date = timezone.now().date() - timedelta(days=days)
+    return HostelStudentAttendance.objects.filter(
+        student_id=student_id,
+        date__gte=start_date
+    ).order_by('-date')
 
 
-def get_notices_by_hall(hall):
-    """Get all notices for a specific hall."""
-    return HostelNoticeBoard.objects.filter(hall=hall).select_related('hall', 'posted_by__user').order_by('-id')
+def list_attendance_by_date(hall_id, date):
+    """Get attendance records for a hall on a specific date."""
+    return HostelStudentAttendance.objects.filter(
+        hall__hall_id=hall_id,
+        date=date
+    ).order_by('student__user__username')
 
 
-# ══════════════════════════════════════════════════════════════
-# STUDENT ATTENDANCE SELECTORS
-# ══════════════════════════════════════════════════════════════
-
-def get_all_attendance():
-    """Retrieve all student attendance records."""
-    return HostelStudentAttendence.objects.all().select_related('hall', 'student_id__id__user')
-
-
-def get_attendance_by_hall(hall):
-    """Get all attendance records for a specific hall."""
-    return HostelStudentAttendence.objects.filter(hall=hall).select_related('student_id__id__user')
+def list_date_attendance_range(hall_id, start_date, end_date):
+    """Get attendance records for a date range."""
+    return HostelStudentAttendance.objects.filter(
+        hall__hall_id=hall_id,
+        date__range=[start_date, end_date]
+    ).order_by('-date', 'student__user__username')
 
 
-def get_attendance_by_student_and_date(student, date):
-    """Check if attendance exists for a student on a specific date."""
-    return HostelStudentAttendence.objects.filter(student_id=student, date=date).first()
+def get_transaction_history(transaction_id):
+    """Get a specific transaction history record."""
+    return HostelTransactionHistory.objects.filter(id=transaction_id).first()
 
 
-def attendance_exists(student, date) -> bool:
-    """Check if attendance record exists."""
-    return HostelStudentAttendence.objects.filter(student_id=student, date=date).exists()
+def list_hall_transactions(hall_id):
+    """Get transaction history for a hall."""
+    return HostelTransactionHistory.objects.filter(
+        hall__hall_id=hall_id
+    ).order_by('-timestamp')
 
 
-# ══════════════════════════════════════════════════════════════
-# HALL ROOM SELECTORS
-# ══════════════════════════════════════════════════════════════
-
-def get_all_hall_rooms():
-    """Retrieve all hall rooms."""
-    return HallRoom.objects.all().select_related('hall')
-
-
-def get_rooms_by_hall(hall):
-    """Get all rooms for a specific hall."""
-    return HallRoom.objects.filter(hall=hall)
-
-
-def get_room_by_id(room_id: int):
-    """Retrieve a specific room by ID."""
-    return HallRoom.objects.select_related('hall').get(id=room_id)
-
-
-def get_available_rooms_by_hall(hall):
-    """Get all available rooms (not at full capacity) for a specific hall."""
-    return HallRoom.objects.filter(hall=hall).filter(room_cap__gt=F('room_occupied'))
-
-
-def get_room_by_details(hall, block_no: str, room_no: str):
-    """Get a specific room by hall, block and room number."""
-    return HallRoom.objects.filter(hall=hall, block_no=block_no, room_no=room_no).first()
-
-
-def get_allotted_rooms_by_hall(hall):
-    """Get all rooms with at least one occupant."""
-    return HallRoom.objects.filter(hall=hall, room_occupied__gt=0)
+def list_transactions_by_change_type(hall_id, change_type):
+    """Get transactions by change type."""
+    return HostelTransactionHistory.objects.filter(
+        hall__hall_id=hall_id,
+        change_type=change_type
+    ).order_by('-timestamp')
 
 
 # ══════════════════════════════════════════════════════════════
-# WORKER REPORT SELECTORS
+# WORKER REPORT QUERIES
 # ══════════════════════════════════════════════════════════════
 
-def get_all_worker_reports():
-    """Retrieve all worker reports."""
-    return WorkerReport.objects.all().select_related('hall')
-
-
-def get_worker_reports_by_hall(hall):
-    """Get all worker reports for a specific hall."""
-    return WorkerReport.objects.filter(hall=hall)
-
-
-def get_worker_reports_by_hall_and_period(hall, year: int, month: int):
-    """Get worker reports for a specific hall and time period."""
-    return WorkerReport.objects.filter(hall=hall, year=year, month=month)
-
-
-# ══════════════════════════════════════════════════════════════
-# HOSTEL INVENTORY SELECTORS
-# ══════════════════════════════════════════════════════════════
-
-def get_all_inventory():
-    """Retrieve all hostel inventory items."""
-    return HostelInventory.objects.all().select_related('hall').order_by('inventory_id')
-
-
-def get_inventory_by_id(inventory_id: int):
-    """Retrieve a specific inventory item by ID."""
-    return HostelInventory.objects.select_related('hall').get(inventory_id=inventory_id)
-
-
-def get_inventory_by_hall(hall_id: int):
-    """Get all inventory items for a specific hall."""
-    return HostelInventory.objects.filter(hall_id=hall_id).order_by('inventory_id')
-
-
-# ══════════════════════════════════════════════════════════════
-# LEAVE SELECTORS
-# ══════════════════════════════════════════════════════════════
-
-def get_all_leaves():
-    """Retrieve all hostel leave applications."""
-    return HostelLeave.objects.all().order_by('-start_date')
-
-
-def get_leave_by_id(leave_id: int):
-    """Retrieve a specific leave application by ID."""
-    return HostelLeave.objects.get(id=leave_id)
-
-
-def get_leaves_by_roll_number(roll_num: str):
-    """Get all leave applications for a specific student."""
-    return HostelLeave.objects.filter(roll_num__iexact=roll_num).order_by('-start_date')
-
-
-def get_pending_leaves():
-    """Get all pending leave applications."""
-    return HostelLeave.objects.filter(status=LeaveStatus.PENDING).order_by('-start_date')
-
-
-# ══════════════════════════════════════════════════════════════
-# COMPLAINT SELECTORS
-# ══════════════════════════════════════════════════════════════
-
-def get_all_complaints():
-    """Retrieve all hostel complaints."""
-    return HostelComplaint.objects.all()
-
-
-def get_complaint_by_id(complaint_id: int):
-    """Retrieve a specific complaint by ID."""
-    return HostelComplaint.objects.get(id=complaint_id)
-
-
-def get_complaints_by_roll_number(roll_number: str):
-    """Get all complaints filed by a specific student."""
-    return HostelComplaint.objects.filter(roll_number=roll_number)
-
-
-# ══════════════════════════════════════════════════════════════
-# HOSTEL ALLOTMENT SELECTORS
-# ══════════════════════════════════════════════════════════════
-
-def get_all_allotments():
-    """Retrieve all hostel allotments."""
-    return HostelAllotment.objects.all().select_related('hall', 'assignedCaretaker__id__user', 'assignedWarden__id__user')
-
-
-def get_allotment_by_id(allotment_id: int):
-    """Retrieve a specific allotment by ID."""
-    return HostelAllotment.objects.select_related('hall', 'assignedCaretaker', 'assignedWarden').get(id=allotment_id)
-
-
-def get_allotments_by_hall(hall):
-    """Get all allotments for a specific hall."""
-    return HostelAllotment.objects.filter(hall=hall).select_related('assignedCaretaker', 'assignedWarden')
-
-
-# ══════════════════════════════════════════════════════════════
-# STUDENT DETAILS SELECTORS
-# ══════════════════════════════════════════════════════════════
-
-def get_all_student_details():
-    """Retrieve all student details."""
-    return StudentDetails.objects.all()
-
-
-def get_student_details_by_id(student_id: str):
-    """Retrieve student details by ID."""
-    return StudentDetails.objects.get(id=student_id)
-
-
-def get_student_details_by_hall_id(hall_id: str):
-    """Get all student details for a specific hall."""
-    return StudentDetails.objects.filter(hall_id=hall_id)
-
-
-# ══════════════════════════════════════════════════════════════
-# STUDENT SELECTORS (from globals)
-# ══════════════════════════════════════════════════════════════
-
-def get_all_students():
-    """Retrieve all students."""
-    return Student.objects.all().select_related('id__user')
-
-
-def get_student_by_id(student_id: str):
-    """Retrieve a specific student by ID."""
-    return Student.objects.select_related('id__user').get(id=student_id)
-
-
-def get_students_by_hall_no(hall_no: int):
-    """Get all students in a specific hall."""
-    return Student.objects.filter(hall_no=hall_no).select_related('id__user')
-
-
-def student_exists(student_id: str) -> bool:
-    """Check if a student exists."""
-    return Student.objects.filter(id_id=student_id).exists()
-
-
-# ══════════════════════════════════════════════════════════════
-# HOSTEL FINE SELECTORS
-# ══════════════════════════════════════════════════════════════
-
-def get_all_fines():
-    """Retrieve all hostel fines."""
-    return HostelFine.objects.all().select_related('student__id__user', 'hall').order_by('fine_id')
-
-
-def get_fine_by_id(fine_id: int):
-    """Retrieve a specific fine by ID."""
-    return HostelFine.objects.select_related('student__id__user', 'hall').get(fine_id=fine_id)
-
-
-def get_fines_by_hall(hall_id: int):
-    """Get all fines for a specific hall."""
-    return HostelFine.objects.filter(hall_id=hall_id).select_related('student__id__user').order_by('fine_id')
-
-
-def get_fines_by_student(student_id: str):
-    """Get all fines for a specific student."""
-    return HostelFine.objects.filter(student_id=student_id).select_related('hall').order_by('fine_id')
-
-
-def get_pending_fines_by_student(student_id: str):
-    """Get all pending fines for a specific student."""
-    return HostelFine.objects.filter(student_id=student_id, status=FineStatus.PENDING).order_by('fine_id')
-
-
-# ══════════════════════════════════════════════════════════════
-# HISTORY SELECTORS
-# ══════════════════════════════════════════════════════════════
-
-def get_all_transaction_history():
-    """Retrieve all transaction history."""
-    return HostelTransactionHistory.objects.all().select_related('hall').order_by('-timestamp')
-
-
-def get_transaction_history_by_hall(hall):
-    """Get transaction history for a specific hall."""
-    return HostelTransactionHistory.objects.filter(hall=hall).order_by('-timestamp')
-
-
-def get_all_hostel_history():
-    """Retrieve all hostel history."""
-    return HostelHistory.objects.all().select_related('hall', 'caretaker__id__user', 'warden__id__user').order_by('-timestamp')
-
-
-def get_hostel_history_by_hall(hall):
-    """Get hostel history for a specific hall."""
-    return HostelHistory.objects.filter(hall=hall).select_related('caretaker__id__user', 'warden__id__user').order_by('-timestamp')
-
-
-# ══════════════════════════════════════════════════════════════
-# STAFF & FACULTY SELECTORS (from globals)
-# ══════════════════════════════════════════════════════════════
-
-def get_all_staff():
-    """Retrieve all staff members."""
-    return Staff.objects.all().select_related('id__user')
-
-
-def get_staff_by_id(staff_id):
-    """Retrieve a specific staff member by ID."""
-    return Staff.objects.select_related('id__user').get(pk=staff_id)
-
-
-def get_staff_by_username(username: str):
-    """Get staff member by username."""
-    return Staff.objects.select_related('id__user').get(id__user__username=username)
-
-
-def get_all_faculty():
-    """Retrieve all faculty members."""
-    return Faculty.objects.all().select_related('id__user')
-
-
-def get_faculty_by_id(faculty_id):
-    """Retrieve a specific faculty member by ID."""
-    return Faculty.objects.select_related('id__user').get(pk=faculty_id)
-
-
-def get_faculty_by_username(username: str):
-    """Get faculty member by username."""
-    return Faculty.objects.select_related('id__user').get(id__user__username=username)
-
-
-# ══════════════════════════════════════════════════════════════
-# USER SELECTORS
-# ══════════════════════════════════════════════════════════════
-
-def get_user_by_username(username: str):
-    """Get user by username."""
-    return User.objects.get(username=username)
-
-
-def user_exists_by_username(username: str) -> bool:
-    """Check if user exists by username."""
-    return User.objects.filter(username=username).exists()
-
-
-# ══════════════════════════════════════════════════════════════
-# USER ROLE SELECTORS
-# ══════════════════════════════════════════════════════════════
-
-def get_user_hostel_role(user: User):
-    """
-    Determine the hostel role for a user.
-    Returns: 'caretaker', 'warden', 'student', or None
-    """
-    try:
-        extra_info = user.extrainfo
-        
-        # Check if user is a caretaker
-        if extra_info.user_type == 'staff':
-            caretaker = HallCaretaker.objects.filter(staff__id=extra_info).select_related('hall').first()
-            if caretaker:
-                return {
-                    'role': 'caretaker',
-                    'hall': caretaker.hall.hall_id if caretaker.hall else None,
-                    'hall_name': caretaker.hall.hall_name if caretaker.hall else None
-                }
-        
-        # Check if user is a warden
-        if extra_info.user_type == 'faculty':
-            warden = HallWarden.objects.filter(faculty__id=extra_info).select_related('hall').first()
-            if warden:
-                return {
-                    'role': 'warden',
-                    'hall': warden.hall.hall_id if warden.hall else None,
-                    'hall_name': warden.hall.hall_name if warden.hall else None
-                }
-        
-        # Check if user is a student
-        if extra_info.user_type == 'student':
-            return {
-                'role': 'student',
-                'hall': None,
-                'hall_name': None
-            }
-        
-        return None
-    except Exception:
-        return None
-
-
-def is_user_caretaker(user: User) -> bool:
-    """Check if user is a hostel caretaker."""
-    role_info = get_user_hostel_role(user)
-    return role_info is not None and role_info.get('role') == 'caretaker'
-
-
-def is_user_warden(user: User) -> bool:
-    """Check if user is a hostel warden."""
-    role_info = get_user_hostel_role(user)
-    return role_info is not None and role_info.get('role') == 'warden'
-
-
-def is_user_student(user: User) -> bool:
-    """Check if user is a student."""
-    role_info = get_user_hostel_role(user)
-    return role_info is not None and role_info.get('role') == 'student'
+def get_worker_report(report_id):
+    """Get a specific worker report."""
+    return WorkerReport.objects.filter(id=report_id).first()
+
+
+def list_staff_reports(staff_id):
+    """Get all reports for a staff member."""
+    return WorkerReport.objects.filter(
+        staff_id=staff_id
+    ).order_by('-year', '-month')
+
+
+def list_hall_reports(hall_id):
+    """Get all reports for a hall."""
+    return WorkerReport.objects.filter(
+        hall__hall_id=hall_id
+    ).order_by('-year', '-month')
+
+
+def get_monthly_report(staff_id, year, month):
+    """Get report for a specific staff member for a specific month."""
+    return WorkerReport.objects.filter(
+        staff_id=staff_id,
+        year=year,
+        month=month
+    ).first()

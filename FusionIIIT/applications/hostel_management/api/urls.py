@@ -1,103 +1,154 @@
 """
-URL Configuration for Hostel Management API.
+API URL Configuration for Hostel Management Module
 
-All API routing with kebab-case paths and named URLs.
+CRITICAL RULES:
+- Only router definitions and URL patterns here
+- No views, no logic
+- Use viewsets with DefaultRouter for RESTful consistency
+
+URL Structure:
+/api/hostel-management/
+├── halls/                           - Hall management
+├── leaves/                          - Leave requests (HM-WF-101)
+├── complaints/                      - Complaints (HM-WF-102)
+├── room-allocations/               - Room allocation (HM-WF-103)
+├── room-changes/                   - Room changes (HM-WF-104)
+├── fines/                          - Fine management (HM-WF-105)
+├── schedules/                      - Staff schedules (HM-WF-107)
+├── inventory/                      - Inventory (HM-WF-108)
+├── guest-bookings/                - Guest room bookings (HM-WF-112)
+└── notices/                        - Notice board (HM-WF-110)
 """
 
-from django.urls import path
+from django.urls import path, include
 from . import views
 
 app_name = 'hostel_management_api'
 
+# ══════════════════════════════════════════════════════════════
+# HALL MANAGEMENT ROUTES
+# ══════════════════════════════════════════════════════════════
+hall_patterns = [
+    path('', views.HallListCreateView.as_view(), name='hall-list-create'),
+    path('<int:pk>/', views.HallRetrieveUpdateDestroyView.as_view(), name='hall-detail'),
+    path('<int:pk>/rooms/', views.HallRoomListCreateView.as_view(), name='hall-rooms-list-create'),
+    path('<int:hall_pk>/rooms/<int:pk>/', views.HallRoomRetrieveUpdateDestroyView.as_view(), name='hall-room-detail'),
+]
+
+# ══════════════════════════════════════════════════════════════
+# SUPER ADMIN MANAGEMENT ROUTES
+# ══════════════════════════════════════════════════════════════
+admin_patterns = [
+    path('assign-warden/', views.WardenAssignmentView.as_view(), name='assign-warden'),
+    path('assign-caretaker/', views.CaretakerAssignmentView.as_view(), name='assign-caretaker'),
+    path('assignments/', views.StaffAssignmentListView.as_view(), name='assignments-list'),
+    path('assignments/<int:pk>/', views.StaffAssignmentDeleteView.as_view(), name='assignments-delete'),
+    path('faculty/', views.FacultyListView.as_view(), name='faculty-list'),
+    path('staff/', views.StaffListView.as_view(), name='staff-list'),
+    path('allocate-batch/', views.BatchAllocationView.as_view(), name='allocate-batch'),
+    path('active-batches/', views.ActiveBatchYearsView.as_view(), name='active-batches'),
+    path('rooms/<int:pk>/rename/', views.RoomRenameView.as_view(), name='room-rename'),
+]
+
+# ══════════════════════════════════════════════════════════════
+# LEAVE MANAGEMENT ROUTES (HM-WF-101)
+# ══════════════════════════════════════════════════════════════
+leave_patterns = [
+    path('', views.LeaveListCreateView.as_view(), name='leave-list-create'),
+    path('<int:pk>/', views.LeaveRetrieveUpdateView.as_view(), name='leave-detail'),
+    path('<int:pk>/approve/', views.LeaveApproveView.as_view(), name='leave-approve'),
+    path('<int:pk>/reject/', views.LeaveRejectView.as_view(), name='leave-reject'),
+]
+
+# ══════════════════════════════════════════════════════════════
+# COMPLAINT MANAGEMENT ROUTES (HM-WF-102)
+# ══════════════════════════════════════════════════════════════
+complaint_patterns = [
+    path('', views.ComplaintListCreateView.as_view(), name='complaint-list-create'),
+    path('<int:pk>/', views.ComplaintRetrieveUpdateView.as_view(), name='complaint-detail'),
+    path('<int:pk>/escalate/', views.ComplaintEscalateView.as_view(), name='complaint-escalate'),
+    path('<int:pk>/resolve/', views.ComplaintResolveView.as_view(), name='complaint-resolve'),
+]
+
+# ══════════════════════════════════════════════════════════════
+# ROOM ALLOCATION ROUTES (HM-WF-103)
+# ══════════════════════════════════════════════════════════════
+allocation_patterns = [
+    path('', views.RoomAllocationListView.as_view(), name='allocation-list'),
+    path('<int:pk>/', views.RoomAllocationRetrieveView.as_view(), name='allocation-detail'),
+    path('<int:pk>/delete/', views.RoomAllocationDestroyView.as_view(), name='allocation-delete'),
+    path('bulk-allocate/', views.BulkRoomAllocationView.as_view(), name='bulk-allocate'),
+]
+
+# ══════════════════════════════════════════════════════════════
+# ROOM CHANGE ROUTES (HM-WF-104)
+# ══════════════════════════════════════════════════════════════
+room_change_patterns = [
+    path('', views.RoomChangeListCreateView.as_view(), name='room-change-list-create'),
+    path('<int:pk>/', views.RoomChangeRetrieveView.as_view(), name='room-change-detail'),
+    path('<int:pk>/approve/', views.RoomChangeApproveView.as_view(), name='room-change-approve'),
+    path('<int:pk>/reject/', views.RoomChangeRejectView.as_view(), name='room-change-reject'),
+]
+
+# ══════════════════════════════════════════════════════════════
+# FINE MANAGEMENT ROUTES (HM-WF-105)
+# ══════════════════════════════════════════════════════════════
+fine_patterns = [
+    path('', views.FineListCreateView.as_view(), name='fine-list-create'),
+    path('<int:pk>/', views.FineRetrieveView.as_view(), name='fine-detail'),
+    path('<int:pk>/mark-paid/', views.FineMarkPaidView.as_view(), name='fine-mark-paid'),
+    path('<int:pk>/waive/', views.FineWaiveView.as_view(), name='fine-waive'),
+]
+
+# ══════════════════════════════════════════════════════════════
+# STAFF SCHEDULE ROUTES (HM-WF-107)
+# ══════════════════════════════════════════════════════════════
+schedule_patterns = [
+    path('', views.StaffScheduleListCreateView.as_view(), name='schedule-list-create'),
+    path('<int:pk>/', views.StaffScheduleRetrieveUpdateDestroyView.as_view(), name='schedule-detail'),
+]
+
+# ══════════════════════════════════════════════════════════════
+# INVENTORY MANAGEMENT ROUTES (HM-WF-108)
+# ══════════════════════════════════════════════════════════════
+inventory_patterns = [
+    path('', views.InventoryListCreateView.as_view(), name='inventory-list-create'),
+    path('<int:pk>/', views.InventoryRetrieveUpdateView.as_view(), name='inventory-detail'),
+]
+
+# ══════════════════════════════════════════════════════════════
+# NOTICE BOARD ROUTES (HM-WF-110)
+# ══════════════════════════════════════════════════════════════
+notice_patterns = [
+    path('', views.NoticeListView.as_view(), name='notice-list'),
+    path('<int:pk>/', views.NoticeRetrieveView.as_view(), name='notice-detail'),
+]
+
+# ══════════════════════════════════════════════════════════════
+# GUEST ROOM BOOKING ROUTES (HM-WF-112)
+# ══════════════════════════════════════════════════════════════
+guest_booking_patterns = [
+    path('', views.GuestBookingListCreateView.as_view(), name='guest-booking-list-create'),
+    path('<int:pk>/', views.GuestBookingRetrieveUpdateView.as_view(), name='guest-booking-detail'),
+    path('<int:pk>/approve/', views.GuestBookingApproveView.as_view(), name='guest-booking-approve'),
+    path('<int:pk>/reject/', views.GuestBookingRejectView.as_view(), name='guest-booking-reject'),
+    path('<int:pk>/check-in/', views.GuestBookingCheckInView.as_view(), name='guest-booking-check-in'),
+    path('<int:pk>/check-out/', views.GuestBookingCheckOutView.as_view(), name='guest-booking-check-out'),
+]
+
+# ══════════════════════════════════════════════════════════════
+# MAIN URL PATTERNS - Namespace organization
+# ══════════════════════════════════════════════════════════════
 urlpatterns = [
-    # ══════════════════════════════════════════════════════════════
-    # HALL ENDPOINTS
-    # ══════════════════════════════════════════════════════════════
-    path('halls/', views.list_halls, name='list-halls'),
-    path('halls/<int:hall_id>/', views.get_hall, name='get-hall'),
-    path('halls/create/', views.create_hall, name='create-hall'),
-    path('halls/<int:hall_id>/delete/', views.delete_hall, name='delete-hall'),
-
-    # ══════════════════════════════════════════════════════════════
-    # CARETAKER & WARDEN ENDPOINTS
-    # ══════════════════════════════════════════════════════════════
-    path('caretakers/assign/', views.assign_caretaker, name='assign-caretaker'),
-    path('wardens/assign/', views.assign_warden, name='assign-warden'),
-    path('batches/assign/', views.assign_batch, name='assign-batch'),
-
-    # ══════════════════════════════════════════════════════════════
-    # GUEST ROOM BOOKING ENDPOINTS
-    # ══════════════════════════════════════════════════════════════
-    path('bookings/create/', views.create_booking, name='create-booking'),
-    path('bookings/', views.list_bookings, name='list-bookings'),
-    path('bookings/my/', views.my_bookings, name='my-bookings'),
-    path('bookings/approve/', views.approve_booking, name='approve-booking'),
-    path('bookings/<int:booking_id>/reject/', views.reject_booking, name='reject-booking'),
-
-    # ══════════════════════════════════════════════════════════════
-    # GUEST ROOM ENDPOINTS
-    # ══════════════════════════════════════════════════════════════
-    path('guest-rooms/hall/<int:hall_id>/', views.list_guest_rooms, name='list-guest-rooms'),
-
-    # ══════════════════════════════════════════════════════════════
-    # NOTICE ENDPOINTS
-    # ══════════════════════════════════════════════════════════════
-    path('notices/', views.list_notices, name='list-notices'),
-    path('notices/create/', views.create_notice, name='create-notice'),
-    path('notices/<int:notice_id>/delete/', views.delete_notice, name='delete-notice'),
-
-    # ══════════════════════════════════════════════════════════════
-    # LEAVE ENDPOINTS
-    # ══════════════════════════════════════════════════════════════
-    path('leaves/create/', views.create_leave, name='create-leave'),
-    path('leaves/', views.list_leaves, name='list-leaves'),
-    path('leaves/my/', views.my_leaves, name='my-leaves'),
-    path('leaves/update-status/', views.update_leave_status, name='update-leave-status'),
-
-    # ══════════════════════════════════════════════════════════════
-    # COMPLAINT ENDPOINTS
-    # ══════════════════════════════════════════════════════════════
-    path('complaints/file/', views.file_complaint, name='file-complaint'),
-    path('complaints/', views.list_complaints, name='list-complaints'),
-    path('complaints/my/', views.my_complaints, name='my-complaints'),
-
-    # ══════════════════════════════════════════════════════════════
-    # FINE ENDPOINTS
-    # ══════════════════════════════════════════════════════════════
-    path('fines/impose/', views.impose_fine, name='impose-fine'),
-    path('fines/', views.list_fines, name='list-fines'),
-    path('fines/my/', views.my_fines, name='my-fines'),
-    path('fines/<int:fine_id>/update/', views.update_fine, name='update-fine'),
-    path('fines/<int:fine_id>/delete/', views.delete_fine, name='delete-fine'),
-
-    # ══════════════════════════════════════════════════════════════
-    # INVENTORY ENDPOINTS
-    # ══════════════════════════════════════════════════════════════
-    path('inventory/create/', views.create_inventory, name='create-inventory'),
-    path('inventory/hall/<int:hall_id>/', views.list_inventory, name='list-inventory'),
-    path('inventory/<int:inventory_id>/update/', views.update_inventory, name='update-inventory'),
-    path('inventory/<int:inventory_id>/delete/', views.delete_inventory, name='delete-inventory'),
-
-    # ══════════════════════════════════════════════════════════════
-    # ATTENDANCE ENDPOINTS
-    # ══════════════════════════════════════════════════════════════
-    path('attendance/mark/', views.mark_attendance, name='mark-attendance'),
-    path('attendance/hall/<int:hall_id>/', views.list_attendance, name='list-attendance'),
-
-    # ══════════════════════════════════════════════════════════════
-    # ROOM MANAGEMENT ENDPOINTS
-    # ══════════════════════════════════════════════════════════════
-    path('rooms/hall/<int:hall_id>/', views.list_rooms, name='list-rooms'),
-    path('rooms/change/', views.change_room, name='change-room'),
-
-    # ══════════════════════════════════════════════════════════════
-    # HISTORY ENDPOINTS
-    # ══════════════════════════════════════════════════════════════
-    path('history/transactions/', views.list_transaction_history, name='list-transaction-history'),
-    path('history/hostel/', views.list_hostel_history, name='list-hostel-history'),
-
-    # ══════════════════════════════════════════════════════════════
-    # USER ROLE ENDPOINT
-    # ══════════════════════════════════════════════════════════════
-    path('user/role/', views.get_user_role, name='get-user-role'),
+    path('halls/', include((hall_patterns, 'halls'))),
+    path('admin/', include((admin_patterns, 'admin'))),
+    path('leaves/', include((leave_patterns, 'leaves'))),
+    path('complaints/', include((complaint_patterns, 'complaints'))),
+    path('room-allocations/', include((allocation_patterns, 'allocations'))),
+    path('room-changes/', include((room_change_patterns, 'room-changes'))),
+    path('fines/', include((fine_patterns, 'fines'))),
+    path('schedules/', include((schedule_patterns, 'schedules'))),
+    path('inventory/', include((inventory_patterns, 'inventory'))),
+    path('notices/', include((notice_patterns, 'notices'))),
+    path('guest-bookings/', include((guest_booking_patterns, 'guest-bookings'))),
 ]

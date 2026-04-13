@@ -1,32 +1,47 @@
 """
 Serializers - DRF serializers with field-level validation only.
 
-This module contains all DRF serializers for hostel management.
-NO business logic here - only field-level validate_<fieldname> methods.
+CRITICAL RULES:
+- NO business logic here
+- Only field-level validate_<fieldname> methods
+- Only I/O serialization and validation
+- Use validate_<field>() for field-level validation only
+- Custom validators must NOT involve database queries beyond basic existence checks
+
+Supports Workflows:
+- HM-WF-101: Leave Management
+- HM-WF-102: Complaint Management
+- HM-WF-103: Room Allocation
+- HM-WF-104: Room Changes
+- HM-WF-105: Fine Management
 """
 
 from rest_framework import serializers
+from django.utils import timezone
+from datetime import timedelta
 import re
 
 from ..models import (
     Hall,
     HallCaretaker,
     HallWarden,
-    GuestRoomBooking,
-    StaffSchedule,
-    HostelNoticeBoard,
-    HostelStudentAttendence,
     HallRoom,
-    WorkerReport,
-    HostelInventory,
     HostelLeave,
     HostelComplaint,
-    HostelAllotment,
-    StudentDetails,
-    GuestRoom,
+    RoomAllocation,
+    RoomAllocationChange,
     HostelFine,
-    HostelTransactionHistory,
-    HostelHistory,
+    StaffSchedule,
+    HostelNoticeBoard,
+    HostelInventory,
+    GuestRoom,
+    GuestRoomBooking,
+    HostelStudentAttendance,
+    LeaveStatusChoices,
+    ComplaintStatusChoices,
+    ComplaintCategoryChoices,
+    FineStatusChoices,
+    RoomAllocationStatusChoices,
 )
 
 
@@ -35,326 +50,607 @@ from ..models import (
 # ══════════════════════════════════════════════════════════════
 
 class HallSerializer(serializers.ModelSerializer):
-    vacant_seats = serializers.SerializerMethodField()
-
+    """Read-only serializer for Hall details."""
+    number_of_rooms = serializers.SerializerMethodField()
+    number_students = serializers.SerializerMethodField()
+    
     class Meta:
         model = Hall
-        fields = ['id', 'hall_id', 'hall_name', 'max_accomodation', 'number_students', 'vacant_seats', 'assigned_batch', 'type_of_seater']
-        read_only_fields = ['id', 'number_students']
-
-    def get_vacant_seats(self, obj):
-        return obj.max_accomodation - obj.number_students
-
-
-class HallCreateSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = Hall
-        fields = ['hall_id', 'hall_name', 'max_accomodation', 'type_of_seater', 'assigned_batch']
-
-
-# ══════════════════════════════════════════════════════════════
-# CARETAKER & WARDEN SERIALIZERS
-# ══════════════════════════════════════════════════════════════
-
-class AssignCaretakerSerializer(serializers.Serializer):
-    hall_id = serializers.CharField(max_length=10)
-    caretaker_username = serializers.CharField(max_length=100)
-
-
-class AssignWardenSerializer(serializers.Serializer):
-    hall_id = serializers.CharField(max_length=10)
-    warden_username = serializers.CharField(max_length=100)
-
-
-class AssignBatchSerializer(serializers.Serializer):
-    hall_id = serializers.CharField(max_length=10)
-    batch = serializers.CharField(max_length=50)
-
-
-# ══════════════════════════════════════════════════════════════
-# GUEST ROOM BOOKING SERIALIZERS
-# ══════════════════════════════════════════════════════════════
-
-class GuestRoomBookingSerializer(serializers.ModelSerializer):
-    hall_name = serializers.CharField(source='hall.hall_name', read_only=True)
-    intender_username = serializers.CharField(source='intender.username', read_only=True)
-
-    class Meta:
-        model = GuestRoomBooking
         fields = [
-            'id', 'hall', 'hall_name', 'intender', 'intender_username',
-            'guest_name', 'guest_phone', 'guest_email', 'guest_address',
-            'rooms_required', 'guest_room_id', 'total_guest', 'purpose',
-            'arrival_date', 'arrival_time', 'departure_date', 'departure_time',
-            'status', 'booking_date', 'nationality', 'room_type'
+            'id', 'hall_id', 'hall_name', 'max_accomodation',
+            'number_students', 'assigned_batch', 'type_of_seater', 'number_of_rooms'
         ]
-        read_only_fields = ['id', 'intender', 'status', 'booking_date', 'guest_room_id']
+        read_only_fields = fields
+    
+    def get_number_of_rooms(self, obj):
+        """Get the count of rooms in the hall."""
+        # Use cached count if available (from prefetch_related)
+        if hasattr(obj, '_prefetched_objects_cache'):
+            return len(obj.rooms.all())
+        return obj.rooms.count()
+    
+    def get_number_students(self, obj):
+        """Get the count of currently allocated students in the hall.
+        
+        NOTE: This field is expensive in list views. Consider excluding it
+        from RoomAllocationListView serializer if showing halls there.
+        """
+        # Use cached count if available
+        if hasattr(obj, '_allocated_count_cache'):
+            return obj._allocated_count_cache
+        
+        return RoomAllocation.objects.filter(
+            hall=obj,
+            status=RoomAllocationStatusChoices.ALLOCATED).count()
 
 
-class GuestRoomBookingCreateSerializer(serializers.Serializer):
-    hall_id = serializers.IntegerField()
-    guest_name = serializers.CharField(max_length=255)
-    guest_phone = serializers.CharField(max_length=255)
-    guest_email = serializers.EmailField(required=False, allow_blank=True)
-    guest_address = serializers.CharField(required=False, allow_blank=True)
-    rooms_required = serializers.IntegerField(min_value=1)
-    total_guest = serializers.IntegerField(min_value=1)
-    purpose = serializers.CharField()
-    arrival_date = serializers.DateField()
-    arrival_time = serializers.TimeField()
-    departure_date = serializers.DateField()
-    departure_time = serializers.TimeField()
-    nationality = serializers.CharField(max_length=255, required=False, allow_blank=True)
-    room_type = serializers.ChoiceField(choices=['single', 'double', 'triple'])
+class HallListSerializer(serializers.ModelSerializer):
+    """Lightweight serializer for Hall list views - excludes expensive computations."""
+    number_of_rooms = serializers.SerializerMethodField()
+    number_students = serializers.SerializerMethodField()
+    assigned_batch = serializers.SerializerMethodField()
+    
+    class Meta:
+        model = Hall
+        fields = [
+            'id', 'hall_id', 'hall_name', 'max_accomodation',
+            'number_students', 'assigned_batch', 'type_of_seater', 'number_of_rooms'
+        ]
+        read_only_fields = fields
 
-    def validate(self, data):
-        if data['departure_date'] < data['arrival_date']:
-            raise serializers.ValidationError("Departure date must be after arrival date.")
-        return data
+    def get_number_of_rooms(self, obj):
+        """Get the count of rooms in the hall."""
+        if hasattr(obj, '_prefetched_objects_cache'):
+            return len(obj.rooms.all())
+        return obj.rooms.count()
+    
+    def get_number_students(self, obj):
+        """Get the count of currently allocated students in the hall."""
+        # Use cached count if available
+        if hasattr(obj, '_allocated_count_cache'):
+            return obj._allocated_count_cache
+        
+        return RoomAllocation.objects.filter(
+            hall=obj,
+            status=RoomAllocationStatusChoices.ALLOCATED).count()
+    def get_assigned_batch(self, obj):
+        """Extract batch year from assigned_batch field.
+        
+        The assigned_batch field stores an AcademicBatch object or its year value.
+        This method extracts just the year for display.
+        """
+        if not obj.assigned_batch:
+            return None
+        
+        # If it's already a string/int, try to extract year
+        batch_val = obj.assigned_batch
+        
+        # If batch_val is a string representation of an object
+        if isinstance(batch_val, str):
+            # Try to find year pattern (4 digits)
+            year_match = re.search(r'\b(20\d{2})\b', batch_val)
+            if year_match:
+                return int(year_match.group(1))
+            # If it looks like it could be a year itself
+            try:
+                year_int = int(batch_val)
+                if 2000 <= year_int <= 2100:
+                    return year_int
+            except (ValueError, TypeError):
+                pass
+            return batch_val
+        
+        # If it's an object with a year attribute
+        if hasattr(batch_val, 'year'):
+            return batch_val.year
+        
+        # Try to access year as dict key
+        if isinstance(batch_val, dict) and 'year' in batch_val:
+            return batch_val['year']
+        
+        # Return None if we can't extract the year
+        return None
 
 
-class ApproveBookingSerializer(serializers.Serializer):
-    booking_id = serializers.IntegerField()
-    guest_room_id = serializers.IntegerField()
+class HallCreateUpdateSerializer(serializers.ModelSerializer):
+    """Create and update serializer for Hall with validation."""
+    
+    class Meta:
+        model = Hall
+        fields = [
+            'hall_id', 'hall_name', 'max_accomodation',
+            'assigned_batch', 'type_of_seater'
+        ]
+    
+    def validate_hall_id(self, value):
+        """Validate hall_id format."""
+        if not value or len(value) > 10:
+            raise serializers.ValidationError("Hall ID must be between 1 and 10 characters.")
+        return value
+    
+    def validate_max_accomodation(self, value):
+        """Validate max_accomodation is positive."""
+        if value <= 0:
+            raise serializers.ValidationError("Max accommodation must be greater than 0.")
+        return value
 
 
-# ══════════════════════════════════════════════════════════════
-# GUEST ROOM SERIALIZERS
-# ══════════════════════════════════════════════════════════════
-
-class GuestRoomSerializer(serializers.ModelSerializer):
+class HallCaretakerSerializer(serializers.ModelSerializer):
+    """Serializer for Hall Caretaker assignment."""
+    staff_name = serializers.CharField(source='staff.id.user.username', read_only=True)
     hall_name = serializers.CharField(source='hall.hall_name', read_only=True)
-
+    
     class Meta:
-        model = GuestRoom
-        fields = ['id', 'hall', 'hall_name', 'room', 'occupied_till', 'vacant', 'room_type']
-        read_only_fields = ['id']
+        model = HallCaretaker
+        fields = ['id', 'hall', 'staff', 'staff_name', 'hall_name', 'assigned_date', 'is_active']
+        read_only_fields = ['id', 'assigned_date', 'staff_name', 'hall_name']
 
 
-# ══════════════════════════════════════════════════════════════
-# STAFF SCHEDULE SERIALIZERS
-# ══════════════════════════════════════════════════════════════
-
-class StaffScheduleSerializer(serializers.ModelSerializer):
-    staff_name = serializers.CharField(source='staff_id.id.user.username', read_only=True)
-    hall_id = serializers.CharField(source='hall.hall_id', read_only=True)
-
-    class Meta:
-        model = StaffSchedule
-        fields = ['id', 'hall', 'hall_id', 'staff_id', 'staff_name', 'staff_type', 'day', 'start_time', 'end_time']
-        read_only_fields = ['id']
-
-
-class StaffScheduleCreateSerializer(serializers.Serializer):
-    hall_id = serializers.CharField(max_length=10)
-    staff_id = serializers.IntegerField()
-    staff_type = serializers.CharField(max_length=100)
-    day = serializers.ChoiceField(choices=['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'])
-    start_time = serializers.TimeField()
-    end_time = serializers.TimeField()
-
-    def validate(self, data):
-        if data['end_time'] <= data['start_time']:
-            raise serializers.ValidationError("End time must be after start time.")
-        return data
-
-
-# ══════════════════════════════════════════════════════════════
-# NOTICE BOARD SERIALIZERS
-# ══════════════════════════════════════════════════════════════
-
-class NoticeBoardSerializer(serializers.ModelSerializer):
-    posted_by_name = serializers.CharField(source='posted_by.user.username', read_only=True)
+class HallWardenSerializer(serializers.ModelSerializer):
+    """Serializer for Hall Warden assignment."""
+    faculty_name = serializers.CharField(source='faculty.id.user.username', read_only=True)
     hall_name = serializers.CharField(source='hall.hall_name', read_only=True)
-
+    
     class Meta:
-        model = HostelNoticeBoard
-        fields = ['id', 'hall', 'hall_name', 'posted_by', 'posted_by_name', 'head_line', 'content', 'description']
-        read_only_fields = ['id', 'posted_by']
-
-
-class NoticeCreateSerializer(serializers.Serializer):
-    hall_id = serializers.IntegerField()
-    head_line = serializers.CharField(max_length=100)
-    description = serializers.CharField(required=False, allow_blank=True)
-    content = serializers.FileField(required=False, allow_null=True)
+        model = HallWarden
+        fields = ['id', 'hall', 'faculty', 'faculty_name', 'hall_name', 'assigned_date', 'is_active']
+        read_only_fields = ['id', 'assigned_date', 'faculty_name', 'hall_name']
 
 
 # ══════════════════════════════════════════════════════════════
-# ATTENDANCE SERIALIZERS
-# ══════════════════════════════════════════════════════════════
-
-class StudentAttendanceSerializer(serializers.ModelSerializer):
-    student_name = serializers.CharField(source='student_id.id.user.username', read_only=True)
-    hall_name = serializers.CharField(source='hall.hall_name', read_only=True)
-
-    class Meta:
-        model = HostelStudentAttendence
-        fields = ['id', 'hall', 'hall_name', 'student_id', 'student_name', 'date', 'present']
-        read_only_fields = ['id']
-
-
-class MarkAttendanceSerializer(serializers.Serializer):
-    student_id = serializers.CharField(max_length=20)
-    date = serializers.DateField()
-
-
-# ══════════════════════════════════════════════════════════════
-# ROOM SERIALIZERS
+# HALL ROOM SERIALIZERS
 # ══════════════════════════════════════════════════════════════
 
 class HallRoomSerializer(serializers.ModelSerializer):
+    """Serializer for Hall Room details."""
     hall_name = serializers.CharField(source='hall.hall_name', read_only=True)
-
+    
     class Meta:
         model = HallRoom
-        fields = ['id', 'hall', 'hall_name', 'room_no', 'block_no', 'room_cap', 'room_occupied']
-        read_only_fields = ['id']
+        fields = [
+            'id', 'hall', 'hall_name', 'room_number', 'block_number',
+            'room_type', 'capacity', 'current_occupancy', 'status',
+            'created_at', 'updated_at'
+        ]
+        read_only_fields = ['id', 'created_at', 'updated_at', 'hall_name']
 
 
-class ChangeRoomSerializer(serializers.Serializer):
-    student_id = serializers.CharField(max_length=20)
-    new_room_no = serializers.CharField(max_length=4)
-    new_hall_no = serializers.CharField(max_length=1)
-
-
-# ══════════════════════════════════════════════════════════════
-# LEAVE SERIALIZERS
-# ══════════════════════════════════════════════════════════════
-
-class HostelLeaveSerializer(serializers.ModelSerializer):
+class HallRoomCreateUpdateSerializer(serializers.ModelSerializer):
+    """Create and update serializer for Hall Room."""
+    
     class Meta:
-        model = HostelLeave
-        fields = ['id', 'student_name', 'roll_num', 'reason', 'phone_number', 'start_date', 'end_date', 'status', 'remark', 'file_upload']
-        read_only_fields = ['id', 'status']
-
-
-class LeaveCreateSerializer(serializers.Serializer):
-    student_name = serializers.CharField(max_length=100)
-    roll_num = serializers.CharField(max_length=20)
-    reason = serializers.CharField()
-    phone_number = serializers.CharField(max_length=20, required=False, allow_blank=True)
-    start_date = serializers.DateField()
-    end_date = serializers.DateField()
-    file_upload = serializers.FileField(required=False, allow_null=True)
-
-    def validate(self, data):
-        if data['end_date'] < data['start_date']:
-            raise serializers.ValidationError("End date must be after or equal to start date.")
-        return data
-
-
-class UpdateLeaveStatusSerializer(serializers.Serializer):
-    leave_id = serializers.IntegerField()
-    status = serializers.ChoiceField(choices=['Approved', 'Rejected'])
-    remark = serializers.CharField(required=False, allow_blank=True)
-
-
-# ══════════════════════════════════════════════════════════════
-# COMPLAINT SERIALIZERS
-# ══════════════════════════════════════════════════════════════
-
-class HostelComplaintSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = HostelComplaint
-        fields = ['id', 'hall_name', 'student_name', 'roll_number', 'description', 'contact_number']
-        read_only_fields = ['id']
-
-
-class ComplaintCreateSerializer(serializers.Serializer):
-    hall_name = serializers.CharField(max_length=100)
-    student_name = serializers.CharField(max_length=100)
-    roll_number = serializers.CharField(max_length=20)
-    description = serializers.CharField()
-    contact_number = serializers.CharField(max_length=15)
-
-    def validate_contact_number(self, value):
-        if not re.match(r'^\+?1?\d{9,15}$', value):
-            raise serializers.ValidationError("Enter a valid contact number.")
+        model = HallRoom
+        fields = ['room_number', 'block_number', 'room_type', 'capacity']
+    
+    def validate_capacity(self, value):
+        """Validate capacity is positive."""
+        if value <= 0:
+            raise serializers.ValidationError("Capacity must be greater than 0.")
+        return value
+    
+    def validate_room_number(self, value):
+        """Validate room_number format."""
+        if not value or len(value) > 20:
+            raise serializers.ValidationError("Room number must be between 1 and 20 characters.")
         return value
 
 
 # ══════════════════════════════════════════════════════════════
-# FINE SERIALIZERS
+# LEAVE SERIALIZERS (HM-WF-101)
+# ══════════════════════════════════════════════════════════════
+
+class HostelLeaveSerializer(serializers.ModelSerializer):
+    """Read-only serializer for Leave details."""
+    student_name = serializers.CharField(source='student.user.username', read_only=True)
+    processed_by_name = serializers.CharField(source='processed_by.id.user.username', read_only=True, allow_null=True)
+    
+    class Meta:
+        model = HostelLeave
+        fields = [
+            'id', 'student', 'student_name', 'start_date', 'end_date',
+            'reason', 'destination', 'contact_phone', 'status', 'remarks',
+            'processed_by', 'processed_by_name', 'created_at', 'updated_at'
+        ]
+        read_only_fields = fields
+
+
+class HostelLeaveCreateSerializer(serializers.ModelSerializer):
+    """Create serializer for Leave with field-level validation."""
+    
+    class Meta:
+        model = HostelLeave
+        fields = ['start_date', 'end_date', 'reason', 'destination', 'contact_phone', 'file_upload']
+    
+    def validate_start_date(self, value):
+        """Validate start_date is in future."""
+        if value < timezone.now().date():
+            raise serializers.ValidationError("Start date must be in the future.")
+        return value
+    
+    def validate_end_date(self, value):
+        """Validate end_date format."""
+        if value < timezone.now().date():
+            raise serializers.ValidationError("End date must be in the future.")
+        return value
+    
+    def validate(self, data):
+        """Validate start_date <= end_date."""
+        if data['start_date'] > data['end_date']:
+            raise serializers.ValidationError("End date must be after or equal to start date.")
+        
+        duration = (data['end_date'] - data['start_date']).days
+        if duration > 90:
+            raise serializers.ValidationError("Leave duration cannot exceed 90 days.")
+        
+        if not data.get('reason') or len(data['reason'].strip()) < 10:
+            raise serializers.ValidationError("Reason must be at least 10 characters long.")
+        
+        return data
+
+
+class HostelLeaveApprovalSerializer(serializers.Serializer):
+    """Serializer for Leave approval/rejection."""
+    status = serializers.ChoiceField(choices=[LeaveStatusChoices.APPROVED, LeaveStatusChoices.REJECTED])
+    remarks = serializers.CharField(required=False, allow_blank=True, max_length=500)
+
+
+# ══════════════════════════════════════════════════════════════
+# COMPLAINT SERIALIZERS (HM-WF-102)
+# ══════════════════════════════════════════════════════════════
+
+class HostelComplaintSerializer(serializers.ModelSerializer):
+    """Read-only serializer for Complaint details."""
+    student_name = serializers.CharField(source='student.user.username', read_only=True)
+    assigned_to_name = serializers.CharField(source='assigned_to.id.user.username', read_only=True, allow_null=True)
+    warden_name = serializers.CharField(source='warden_assigned.id.user.username', read_only=True, allow_null=True)
+    
+    class Meta:
+        model = HostelComplaint
+        fields = [
+            'id', 'student', 'student_name', 'hall', 'category', 'priority',
+            'title', 'description', 'location', 'status', 'assigned_to',
+            'assigned_to_name', 'resolution_notes', 'escalated_to_warden',
+            'warden_assigned', 'warden_name', 'created_at', 'updated_at', 'resolved_at'
+        ]
+        read_only_fields = fields
+
+
+class HostelComplaintCreateSerializer(serializers.ModelSerializer):
+    """Create serializer for Complaint with field-level validation."""
+    
+    class Meta:
+        model = HostelComplaint
+        fields = ['category', 'priority', 'title', 'description', 'location']
+    
+    def validate_title(self, value):
+        """Validate title length."""
+        if not value or len(value) < 5:
+            raise serializers.ValidationError("Title must be at least 5 characters.")
+        if len(value) > 255:
+            raise serializers.ValidationError("Title must not exceed 255 characters.")
+        return value
+    
+    def validate_description(self, value):
+        """Validate description length."""
+        if not value or len(value.strip()) < 20:
+            raise serializers.ValidationError("Description must be at least 20 characters.")
+        return value
+    
+    def validate_category(self, value):
+        """Validate category is valid."""
+        if value not in dict(ComplaintCategoryChoices.choices):
+            raise serializers.ValidationError("Invalid complaint category.")
+        return value
+
+
+class HostelComplaintUpdateSerializer(serializers.ModelSerializer):
+    """Update serializer for Complaint status and resolution."""
+    
+    class Meta:
+        model = HostelComplaint
+        fields = ['status', 'resolution_notes', 'priority']
+    
+    def validate_resolution_notes(self, value):
+        """Validate resolution notes if status is RESOLVED."""
+        if value and len(value.strip()) < 10:
+            raise serializers.ValidationError("Resolution notes must be at least 10 characters.")
+        return value
+
+
+class HostelComplaintEscalateSerializer(serializers.Serializer):
+    """Serializer for escalating complaint to warden."""
+    reason = serializers.CharField(max_length=500)
+
+
+# ══════════════════════════════════════════════════════════════
+# ROOM ALLOCATION SERIALIZERS (HM-WF-103)
+# ══════════════════════════════════════════════════════════════
+
+class RoomAllocationSerializer(serializers.ModelSerializer):
+    """Read-only serializer for Room Allocation details with optimized queries."""
+    student_name = serializers.CharField(source='student.id.user.username', read_only=True)
+    room_number = serializers.CharField(source='room.room_number', read_only=True, allow_null=True)
+    hall_name = serializers.CharField(source='hall.hall_name', read_only=True, allow_null=True)
+    allocated_by_name = serializers.CharField(source='allocated_by.id.user.username', read_only=True, allow_null=True)
+    
+    class Meta:
+        model = RoomAllocation
+        fields = [
+            'id', 'student', 'student_name', 'room', 'room_number', 'hall', 'hall_name', 'status',
+            'allocation_date', 'release_date', 'allocated_by', 'allocated_by_name'
+        ]
+        read_only_fields = fields
+
+
+class RoomAllocationCreateSerializer(serializers.ModelSerializer):
+    """Create serializer for Room Allocation."""
+    
+    class Meta:
+        model = RoomAllocation
+        fields = ['room', 'allocation_date']
+    
+    def validate_allocation_date(self, value):
+        """Validate allocation_date."""
+        if value < timezone.now().date():
+            raise serializers.ValidationError("Allocation date cannot be in the past.")
+        return value
+
+
+# ══════════════════════════════════════════════════════════════
+# ROOM ALLOCATION CHANGE SERIALIZERS (HM-WF-104)
+# ══════════════════════════════════════════════════════════════
+
+class RoomAllocationChangeSerializer(serializers.ModelSerializer):
+    """Serializer for Room Change - both read and write operations."""
+    student_name = serializers.CharField(source='student.user.username', read_only=True)
+    current_room_number = serializers.CharField(source='current_room.room_number', read_only=True)
+    requested_room_number = serializers.CharField(source='requested_room.room_number', read_only=True)
+    warden_name = serializers.CharField(source='approved_by_warden.id.user.username', read_only=True, allow_null=True)
+    caretaker_name = serializers.CharField(source='approved_by_caretaker.id.user.username', read_only=True, allow_null=True)
+    
+    class Meta:
+        model = RoomAllocationChange
+        fields = [
+            'id', 'student', 'student_name', 'current_room', 'current_room_number',
+            'requested_room', 'requested_room_number', 'reason', 'status',
+            'requested_date', 'effective_date', 'approved_by_warden', 'warden_name',
+            'warden_remarks', 'approved_by_caretaker', 'caretaker_name', 'caretaker_remarks',
+            'rejection_reason', 'created_at', 'updated_at'
+        ]
+        read_only_fields = [
+            'id', 'student', 'student_name', 'current_room', 'current_room_number',
+            'requested_room_number', 'status', 'requested_date', 'effective_date',
+            'approved_by_warden', 'warden_name', 'warden_remarks', 'approved_by_caretaker',
+            'caretaker_name', 'caretaker_remarks', 'rejection_reason', 'created_at', 'updated_at'
+        ]
+    
+    def validate_reason(self, value):
+        """Validate reason length."""
+        if not value or len(value.strip()) < 10:
+            raise serializers.ValidationError("Reason must be at least 10 characters.")
+        return value
+
+
+class RoomAllocationChangeApprovalSerializer(serializers.Serializer):
+    """Serializer for Room Change approval."""
+    approve = serializers.BooleanField()
+    remarks = serializers.CharField(required=False, allow_blank=True, max_length=500)
+    effective_date = serializers.DateField(required=False)
+
+
+# ══════════════════════════════════════════════════════════════
+# FINE SERIALIZERS (HM-WF-105)
 # ══════════════════════════════════════════════════════════════
 
 class HostelFineSerializer(serializers.ModelSerializer):
-    student_roll_no = serializers.CharField(source='student.id.id', read_only=True)
-    hall_name = serializers.CharField(source='hall.hall_name', read_only=True)
-
+    """Read-only serializer for Fine details."""
+    student_name = serializers.CharField(source='student.user.username', read_only=True)
+    issued_by_name = serializers.CharField(source='issued_by.id.user.username', read_only=True, allow_null=True)
+    waived_by_name = serializers.CharField(source='waived_by.id.user.username', read_only=True, allow_null=True)
+    
     class Meta:
         model = HostelFine
-        fields = ['fine_id', 'student', 'student_roll_no', 'hall', 'hall_name', 'student_name', 'amount', 'status', 'reason']
-        read_only_fields = ['fine_id']
+        fields = [
+            'id', 'student', 'student_name', 'hall', 'fine_type', 'amount',
+            'reason', 'status', 'issued_date', 'due_date', 'paid_date',
+            'issued_by', 'issued_by_name', 'waived_by', 'waived_by_name',
+            'waive_reason', 'created_at', 'updated_at'
+        ]
+        read_only_fields = fields
 
 
-class ImposeFineSerializer(serializers.Serializer):
-    student_id = serializers.CharField(max_length=20)
-    student_name = serializers.CharField(max_length=100)
-    hall_id = serializers.IntegerField()
-    amount = serializers.DecimalField(max_digits=10, decimal_places=2, min_value=0)
-    reason = serializers.CharField()
+class HostelFineCreateSerializer(serializers.ModelSerializer):
+    """Create serializer for Fine with field-level validation."""
+    
+    class Meta:
+        model = HostelFine
+        fields = ['fine_type', 'amount', 'reason', 'due_date']
+    
+    def validate_amount(self, value):
+        """Validate amount is positive."""
+        if value <= 0:
+            raise serializers.ValidationError("Fine amount must be greater than 0.")
+        if value > 100000:
+            raise serializers.ValidationError("Fine amount exceeds maximum limit.")
+        return value
+    
+    def validate_reason(self, value):
+        """Validate reason length."""
+        if not value or len(value.strip()) < 10:
+            raise serializers.ValidationError("Reason must be at least 10 characters.")
+        return value
+    
+    def validate_due_date(self, value):
+        """Validate due_date is in future."""
+        if value < timezone.now().date():
+            raise serializers.ValidationError("Due date must be in the future.")
+        return value
 
 
-class UpdateFineSerializer(serializers.Serializer):
-    fine_id = serializers.IntegerField()
-    amount = serializers.DecimalField(max_digits=10, decimal_places=2, min_value=0, required=False)
-    status = serializers.ChoiceField(choices=['Pending', 'Paid'], required=False)
-    reason = serializers.CharField(required=False)
+class HostelFinePaymentSerializer(serializers.Serializer):
+    """Serializer for marking fine as paid."""
+    paid_date = serializers.DateField()
+    
+    def validate_paid_date(self, value):
+        """Validate paid_date is not in future."""
+        if value > timezone.now().date():
+            raise serializers.ValidationError("Paid date cannot be in the future.")
+        return value
+
+
+class HostelFineWaiverSerializer(serializers.Serializer):
+    """Serializer for waiving fine."""
+    waive_reason = serializers.CharField(max_length=500)
 
 
 # ══════════════════════════════════════════════════════════════
-# INVENTORY SERIALIZERS
+# STAFF SCHEDULE SERIALIZERS (HM-WF-107)
+# ══════════════════════════════════════════════════════════════
+
+class StaffScheduleSerializer(serializers.ModelSerializer):
+    """Serializer for Staff Schedule."""
+    hall_name = serializers.CharField(source='hall.hall_name', read_only=True)
+    staff_name = serializers.CharField(source='staff.id.user.username', read_only=True)
+    
+    class Meta:
+        model = StaffSchedule
+        fields = [
+            'id', 'hall', 'hall_name', 'staff', 'staff_name', 'day_of_week',
+            'start_time', 'end_time', 'shift_type', 'created_at', 'updated_at'
+        ]
+        read_only_fields = ['id', 'created_at', 'updated_at', 'hall_name', 'staff_name']
+
+
+# ══════════════════════════════════════════════════════════════
+# INVENTORY SERIALIZERS (HM-WF-108)
 # ══════════════════════════════════════════════════════════════
 
 class HostelInventorySerializer(serializers.ModelSerializer):
+    """Serializer for Hostel Inventory."""
     hall_name = serializers.CharField(source='hall.hall_name', read_only=True)
-
+    
     class Meta:
         model = HostelInventory
-        fields = ['inventory_id', 'hall', 'hall_name', 'inventory_name', 'cost', 'quantity']
-        read_only_fields = ['inventory_id']
-
-
-class InventoryCreateSerializer(serializers.Serializer):
-    hall_id = serializers.IntegerField()
-    inventory_name = serializers.CharField(max_length=100)
-    cost = serializers.DecimalField(max_digits=10, decimal_places=2, min_value=0)
-    quantity = serializers.IntegerField(min_value=0)
+        fields = [
+            'id', 'hall', 'hall_name', 'item_name', 'quantity', 'unit_cost',
+            'remarks', 'last_updated', 'created_at'
+        ]
+        read_only_fields = ['id', 'created_at', 'hall_name']
 
 
 # ══════════════════════════════════════════════════════════════
-# WORKER REPORT SERIALIZERS
+# GUEST ROOM SERIALIZERS (HM-WF-112)
 # ══════════════════════════════════════════════════════════════
 
-class WorkerReportSerializer(serializers.ModelSerializer):
+class GuestRoomSerializer(serializers.ModelSerializer):
+    """Read-only serializer for Guest Room."""
     hall_name = serializers.CharField(source='hall.hall_name', read_only=True)
-
+    
     class Meta:
-        model = WorkerReport
-        fields = ['id', 'worker_id', 'hall', 'hall_name', 'worker_name', 'year', 'month', 'absent', 'total_day', 'remark']
-        read_only_fields = ['id']
+        model = GuestRoom
+        fields = [
+            'id', 'hall', 'hall_name', 'room_number', 'room_type',
+            'capacity', 'status', 'created_at', 'updated_at'
+        ]
+        read_only_fields = fields
+
+
+class GuestRoomBookingSerializer(serializers.ModelSerializer):
+    """Read-only serializer for Guest Room Booking."""
+    student_name = serializers.CharField(source='student.user.username', read_only=True)
+    room_number = serializers.CharField(source='guest_room.room_number', read_only=True, allow_null=True)
+    
+    class Meta:
+        model = GuestRoomBooking
+        fields = [
+            'id', 'student', 'student_name', 'guest_room', 'room_number',
+            'guest_name', 'guest_phone', 'guest_email', 'guest_address',
+            'nationality', 'total_guests', 'purpose', 'arrival_date',
+            'arrival_time', 'departure_date', 'departure_time', 'rooms_required',
+            'room_type', 'status', 'review_remarks', 'created_at',
+            'updated_at', 'checked_in_at', 'checked_out_at'
+        ]
+        read_only_fields = fields
+
+
+class GuestRoomBookingCreateSerializer(serializers.ModelSerializer):
+    """Create serializer for Guest Room Booking."""
+    
+    class Meta:
+        model = GuestRoomBooking
+        fields = [
+            'guest_name', 'guest_phone', 'guest_email', 'guest_address',
+            'nationality', 'total_guests', 'purpose', 'arrival_date',
+            'arrival_time', 'departure_date', 'departure_time',
+            'rooms_required', 'room_type'
+        ]
+    
+    def validate_guest_phone(self, value):
+        """Validate phone format."""
+        if not value or len(value) < 10:
+            raise serializers.ValidationError("Phone number must be at least 10 characters.")
+        return value
+    
+    def validate_total_guests(self, value):
+        """Validate total_guests."""
+        if value <= 0:
+            raise serializers.ValidationError("Total guests must be greater than 0.")
+        if value > 100:
+            raise serializers.ValidationError("Total guests cannot exceed 100.")
+        return value
+    
+    def validate(self, data):
+        """Validate arrival and departure dates."""
+        if data['arrival_date'] < timezone.now().date():
+            raise serializers.ValidationError("Arrival date cannot be in the past.")
+        if data['departure_date'] <= data['arrival_date']:
+            raise serializers.ValidationError("Departure date must be after arrival date.")
+        
+        duration = (data['departure_date'] - data['arrival_date']).days
+        if duration > 30:
+            raise serializers.ValidationError("Booking duration cannot exceed 30 days.")
+        
+        return data
+
+
+# ...existing code...
 
 
 # ══════════════════════════════════════════════════════════════
-# HISTORY SERIALIZERS
+# NOTICE BOARD SERIALIZERS (HM-WF-110)
 # ══════════════════════════════════════════════════════════════
 
-class TransactionHistorySerializer(serializers.ModelSerializer):
+class HostelNoticeBoardSerializer(serializers.ModelSerializer):
+    """Serializer for Notice Board."""
     hall_name = serializers.CharField(source='hall.hall_name', read_only=True)
-
+    posted_by_name = serializers.CharField(source='posted_by.username', read_only=True)
+    
     class Meta:
-        model = HostelTransactionHistory
-        fields = ['id', 'hall', 'hall_name', 'change_type', 'previous_value', 'new_value', 'timestamp']
-        read_only_fields = ['id', 'timestamp']
+        model = HostelNoticeBoard
+        fields = [
+            'id', 'hall', 'hall_name', 'title', 'description', 'content_file',
+            'posted_by', 'posted_by_name', 'is_active', 'posted_date',
+            'archive_date', 'updated_at'
+        ]
+        read_only_fields = ['id', 'posted_by', 'posted_date', 'posted_by_name', 'hall_name']
 
 
-class HostelHistorySerializer(serializers.ModelSerializer):
-    hall_name = serializers.CharField(source='hall.hall_name', read_only=True)
-    caretaker_name = serializers.CharField(source='caretaker.id.user.username', read_only=True)
-    warden_name = serializers.CharField(source='warden.id.user.username', read_only=True)
+# ══════════════════════════════════════════════════════════════
+# MISSING APPROVAL SERIALIZERS
+# ══════════════════════════════════════════════════════════════
 
-    class Meta:
-        model = HostelHistory
-        fields = ['id', 'hall', 'hall_name', 'timestamp', 'caretaker', 'caretaker_name', 'batch', 'warden', 'warden_name']
-        read_only_fields = ['id', 'timestamp']
+class RoomVacationRequestVerifySerializer(serializers.Serializer):
+    """Serializer for room vacation verification and approval."""
+    caretaker_remarks = serializers.CharField(required=False, allow_blank=True, max_length=500)
+    approval_remarks = serializers.CharField(required=False, allow_blank=True, max_length=500)
+
+
+class GuestRoomBookingApprovalSerializer(serializers.Serializer):
+    """Serializer for approving/rejecting guest room bookings."""
+    review_remarks = serializers.CharField(required=False, allow_blank=True, max_length=500)
+
+
+class ExtendedStayRequestApprovalSerializer(serializers.Serializer):
+    """Serializer for approving/rejecting extended stay requests."""
+    remarks = serializers.CharField(required=False, allow_blank=True, max_length=500)
+    rejection_reason = serializers.CharField(required=False, allow_blank=True, max_length=500)

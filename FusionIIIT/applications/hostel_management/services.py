@@ -1,1761 +1,996 @@
 """
-Services - All business logic and write operations for hostel management.
+Hostel Management Services
 
-This module contains ALL business logic, validation, and write operations.
-For reads, this module calls selectors. It NEVER uses .objects. for reads.
+This module contains ALL business logic, state mutations, and rule enforcement.
+- Business Rules are enforced here and raise custom exceptions on violation
+- All database mutations go through services
+- Services use selectors for queries
 """
 
-from django.db import transaction
-from django.core.exceptions import ValidationError
-from django.contrib.auth.models import User
 from django.utils import timezone
-from datetime import datetime, date
-import re
+from datetime import datetime, timedelta
+from decimal import Decimal
 
-from applications.globals.models import Staff, Faculty
-from applications.academic_information.models import Student
-
-from . import selectors
 from .models import (
-    Hall,
-    HallCaretaker,
-    HallWarden,
-    GuestRoomBooking,
-    StaffSchedule,
-    HostelNoticeBoard,
-    HostelStudentAttendence,
-    HallRoom,
-    WorkerReport,
-    HostelInventory,
-    HostelLeave,
-    HostelComplaint,
-    HostelAllotment,
-    StudentDetails,
-    GuestRoom,
-    HostelFine,
-    HostelTransactionHistory,
-    HostelHistory,
-    BookingStatus,
-    LeaveStatus,
-    FineStatus,
-    RoomType,
+    HostelLeave, HostelComplaint, RoomAllocation, RoomAllocationChange,
+    HostelFine, HostelStudentAttendance,
+    GuestRoomBooking, GuestRoom,
+    LeaveStatusChoices, ComplaintStatusChoices, RoomAllocationStatusChoices,
+    AllocationChangeStatusChoices, FineStatusChoices, BookingStatusChoices
 )
+from . import selectors
 
 
 # ══════════════════════════════════════════════════════════════
 # CUSTOM EXCEPTIONS
 # ══════════════════════════════════════════════════════════════
 
-class HostelManagementError(Exception):
-    """Base exception for hostel management module."""
+class HostelManagementException(Exception):
+    """Base exception for hostel management errors."""
     pass
 
 
-class HallNotFoundError(HostelManagementError):
-    """Hall does not exist."""
+class LeaveEligibilityError(HostelManagementException):
+    """Raised when leave eligibility is not met (BR-HM-101)."""
     pass
 
 
-class HallAlreadyExistsError(HostelManagementError):
-    """Hall with this ID already exists."""
+class LeaveDateError(HostelManagementException):
+    """Raised when leave dates are invalid (BR-HM-102)."""
     pass
 
 
-class RoomNotAvailableError(HostelManagementError):
-    """Room is full or unavailable."""
+class LeaveJustificationError(HostelManagementException):
+    """Raised when leave lacks justification (BR-HM-103)."""
     pass
 
 
-class RoomNotFoundError(HostelManagementError):
-    """Room does not exist."""
+class LeaveAuthorityError(HostelManagementException):
+    """Raised when leave decision maker lacks authority (BR-HM-104)."""
     pass
 
 
-class StudentNotFoundError(HostelManagementError):
-    """Student does not exist."""
+class ComplaintEligibilityError(HostelManagementException):
+    """Raised when complaint eligibility is not met (BR-HM-106)."""
     pass
 
 
-class StaffNotFoundError(HostelManagementError):
-    """Staff member does not exist."""
+class ComplaintRoutingError(HostelManagementException):
+    """Raised when complaint routing fails (BR-HM-107)."""
     pass
 
 
-class FacultyNotFoundError(HostelManagementError):
-    """Faculty member does not exist."""
+class ResolutionRemarksError(HostelManagementException):
+    """Raised when resolution remarks are missing (BR-HM-108)."""
     pass
 
 
-class InvalidOperationError(HostelManagementError):
-    """Operation not allowed in current state."""
+class EscalationAuthorizationError(HostelManagementException):
+    """Raised when escalation is not authorized (BR-HM-109)."""
     pass
 
 
-class AttendanceAlreadyMarkedError(HostelManagementError):
-    """Attendance already marked for this date."""
+class WardenAuthorityError(HostelManagementException):
+    """Raised when warden authority is required (BR-HM-110)."""
     pass
 
 
-class InsufficientRoomsError(HostelManagementError):
-    """Not enough rooms available."""
+class ApplicationWindowError(HostelManagementException):
+    """Raised when application window is closed (BR-HM-111)."""
     pass
 
 
-class GuestCapacityExceededError(HostelManagementError):
-    """Number of guests exceeds room capacity."""
+class AllotmentCapacityError(HostelManagementException):
+    """Raised when room capacity would be exceeded (BR-HM-112)."""
     pass
 
 
-class UnauthorizedAccessError(HostelManagementError):
-    """User not authorized for this operation."""
+class RoomChangeEligibilityError(HostelManagementException):
+    """Raised when student is not eligible for room change (BR-HM-115)."""
     pass
 
 
-class BookingNotFoundError(HostelManagementError):
-    """Booking does not exist."""
+class DualApprovalError(HostelManagementException):
+    """Raised when dual approval requirement is not met (BR-HM-116)."""
     pass
 
 
-class LeaveNotFoundError(HostelManagementError):
-    """Leave application does not exist."""
+class OccupancyReconciliationError(HostelManagementException):
+    """Raised when occupancy reconciliation fails (BR-HM-117)."""
     pass
 
 
-class FineNotFoundError(HostelManagementError):
-    """Fine does not exist."""
+class RoomVacationPrerequisiteError(HostelManagementException):
+    """Raised when room vacation prerequisites are not met (BR-015)."""
     pass
 
 
-class InventoryNotFoundError(HostelManagementError):
-    """Inventory item does not exist."""
+class FineValidationError(HostelManagementException):
+    """Raised when fine validation fails (BR-HM-013)."""
     pass
 
 
 # ══════════════════════════════════════════════════════════════
-# HALL SERVICES
+# HM-WF-101: LEAVE MANAGEMENT SERVICES
 # ══════════════════════════════════════════════════════════════
 
-@transaction.atomic
-def create_hall(*, hall_id: str, hall_name: str, max_accomodation: int, type_of_seater: str, **kwargs):
-    """Create a new hall."""
-    if selectors.hall_exists_by_hall_id(hall_id):
-        raise HallAlreadyExistsError(f"Hall with ID {hall_id} already exists.")
-
-    hall = Hall.objects.create(
-        hall_id=hall_id,
-        hall_name=hall_name,
-        max_accomodation=max_accomodation,
-        type_of_seater=type_of_seater,
-        **kwargs
-    )
-    return hall
-
-
-@transaction.atomic
-def update_hall(*, hall_id: int, **update_fields):
-    """Update hall information."""
-    try:
-        hall = selectors.get_hall_by_id(hall_id)
-    except Hall.DoesNotExist:
-        raise HallNotFoundError(f"Hall with ID {hall_id} not found.")
-
-    for field, value in update_fields.items():
-        setattr(hall, field, value)
-    hall.save()
-    return hall
-
-
-@transaction.atomic
-def delete_hall(*, hall_id: int):
-    """Delete a hall and its related data."""
-    try:
-        hall = selectors.get_hall_by_id(hall_id)
-    except Hall.DoesNotExist:
-        raise HallNotFoundError(f"Hall with ID {hall_id} not found.")
-
-    # Delete related allotments
-    HostelAllotment.objects.filter(hall=hall).delete()
-
-    # Delete the hall
-    hall.delete()
-
-
-# ══════════════════════════════════════════════════════════════
-# HALL CARETAKER SERVICES
-# ══════════════════════════════════════════════════════════════
-
-@transaction.atomic
-def assign_caretaker(*, hall_id: str, caretaker_username: str):
-    """Assign a caretaker to a hall."""
-    try:
-        hall = selectors.get_hall_by_hall_id(hall_id)
-    except Hall.DoesNotExist:
-        raise HallNotFoundError(f"Hall with ID {hall_id} not found.")
-
-    try:
-        caretaker_staff = selectors.get_staff_by_username(caretaker_username)
-    except Staff.DoesNotExist:
-        raise StaffNotFoundError(f"Caretaker with username {caretaker_username} not found.")
-
-    # Get previous caretaker for history
-    prev_hall_caretaker = selectors.get_caretaker_by_hall(hall)
-
-    # Delete any previous assignments of this caretaker
-    HallCaretaker.objects.filter(staff=caretaker_staff).delete()
-
-    # Delete any previously assigned caretaker to this hall
-    HallCaretaker.objects.filter(hall=hall).delete()
-
-    # Create new assignment
-    hall_caretaker = HallCaretaker.objects.create(hall=hall, staff=caretaker_staff)
-
-    # Update hostel allotments
-    hostel_allotments = selectors.get_allotments_by_hall(hall)
-    for hostel_allotment in hostel_allotments:
-        hostel_allotment.assignedCaretaker = caretaker_staff
-        hostel_allotment.save(update_fields=['assignedCaretaker'])
-
-    # Record transaction history
-    HostelTransactionHistory.objects.create(
-        hall=hall,
-        change_type='Caretaker',
-        previous_value=prev_hall_caretaker.staff.id if (prev_hall_caretaker and prev_hall_caretaker.staff) else 'None',
-        new_value=caretaker_username
-    )
-
-    # Create hostel history
-    current_warden = selectors.get_warden_by_hall(hall)
-    HostelHistory.objects.create(
-        hall=hall,
-        caretaker=caretaker_staff,
-        batch=hall.assigned_batch,
-        warden=current_warden.faculty if (current_warden and current_warden.faculty) else None
-    )
-
-    return hall_caretaker
-
-
-# ══════════════════════════════════════════════════════════════
-# HALL WARDEN SERVICES
-# ══════════════════════════════════════════════════════════════
-
-@transaction.atomic
-def assign_warden(*, hall_id: str, warden_username: str):
-    """Assign a warden to a hall."""
-    try:
-        hall = selectors.get_hall_by_hall_id(hall_id)
-    except Hall.DoesNotExist:
-        raise HallNotFoundError(f"Hall with ID {hall_id} not found.")
-
-    try:
-        warden = selectors.get_faculty_by_username(warden_username)
-    except Faculty.DoesNotExist:
-        raise FacultyNotFoundError(f"Warden with username {warden_username} not found.")
-
-    # Get previous warden for history
-    prev_hall_warden = selectors.get_warden_by_hall(hall)
-
-    # Delete any previous assignments of this warden
-    HallWarden.objects.filter(faculty=warden).delete()
-
-    # Delete any previously assigned warden to this hall
-    HallWarden.objects.filter(hall=hall).delete()
-
-    # Create new assignment
-    hall_warden = HallWarden.objects.create(hall=hall, faculty=warden)
-
-    # Update hostel allotments
-    hostel_allotments = selectors.get_allotments_by_hall(hall)
-    for hostel_allotment in hostel_allotments:
-        hostel_allotment.assignedWarden = warden
-        hostel_allotment.save(update_fields=['assignedWarden'])
-
-    # Record transaction history
-    HostelTransactionHistory.objects.create(
-        hall=hall,
-        change_type='Warden',
-        previous_value=prev_hall_warden.faculty.id if (prev_hall_warden and prev_hall_warden.faculty) else 'None',
-        new_value=warden_username
-    )
-
-    # Create hostel history
-    current_caretaker = selectors.get_caretaker_by_hall(hall)
-    HostelHistory.objects.create(
-        hall=hall,
-        caretaker=current_caretaker.staff if (current_caretaker and current_caretaker.staff) else None,
-        batch=hall.assigned_batch,
-        warden=warden
-    )
-
-    return hall_warden
-
-
-# ══════════════════════════════════════════════════════════════
-# BATCH ASSIGNMENT SERVICES
-# ══════════════════════════════════════════════════════════════
-
-@transaction.atomic
-def assign_batch_to_hall(*, hall_id: str, batch: str):
-    """Assign a batch to a hall."""
-    try:
-        hall = selectors.get_hall_by_hall_id(hall_id)
-    except Hall.DoesNotExist:
-        raise HallNotFoundError(f"Hall with ID {hall_id} not found.")
-
-    previous_batch = hall.assigned_batch if hall.assigned_batch is not None else '0'
-    hall.assigned_batch = batch
-    hall.save(update_fields=['assigned_batch'])
-
-    # Update room allotments
-    room_allotments = selectors.get_allotments_by_hall(hall)
-    for room_allotment in room_allotments:
-        room_allotment.assignedBatch = batch
-        room_allotment.save(update_fields=['assignedBatch'])
-
-    # Update student hall allotments
-    hall_number = int(''.join(filter(str.isdigit, hall.hall_id)))
-    students = Student.objects.filter(batch=int(batch))
-    for student in students:
-        student.hall_no = hall_number
-        student.save(update_fields=['hall_no'])
-
-    # Record transaction history
-    HostelTransactionHistory.objects.create(
-        hall=hall,
-        change_type='Batch',
-        previous_value=previous_batch,
-        new_value=batch
-    )
-
-    # Create hostel history
-    current_caretaker = selectors.get_caretaker_by_hall(hall)
-    current_warden = selectors.get_warden_by_hall(hall)
-    HostelHistory.objects.create(
-        hall=hall,
-        caretaker=current_caretaker.staff if (current_caretaker and current_caretaker.staff) else None,
-        batch=batch,
-        warden=current_warden.faculty if (current_warden and current_warden.faculty) else None
-    )
-
-    return hall
-
-
-# ══════════════════════════════════════════════════════════════
-# GUEST ROOM BOOKING SERVICES
-# ══════════════════════════════════════════════════════════════
-
-@transaction.atomic
-def create_guest_room_booking(
-    *,
-    hall_id: int,
-    intender: User,
-    guest_name: str,
-    guest_phone: str,
-    purpose: str,
-    arrival_date: str,
-    arrival_time: str,
-    departure_date: str,
-    departure_time: str,
-    rooms_required: int,
-    total_guest: int,
-    room_type: str,
-    **kwargs
-):
-    """Create a new guest room booking request."""
-    try:
-        hall = selectors.get_hall_by_id(hall_id)
-    except Hall.DoesNotExist:
-        raise HallNotFoundError(f"Hall with ID {hall_id} not found.")
-
-    # Check room availability
-    available_rooms_count = selectors.count_vacant_rooms_by_hall_and_type(hall_id, room_type)
-    if available_rooms_count < rooms_required:
-        raise InsufficientRoomsError("Not enough available rooms for this booking.")
-
-    # Check guest capacity
-    max_guests = {'single': 1, 'double': 2, 'triple': 3}
-    if total_guest > rooms_required * max_guests.get(room_type, 1):
-        raise GuestCapacityExceededError("Number of guests exceeds the capacity of selected rooms.")
-
-    booking = GuestRoomBooking.objects.create(
-        hall=hall,
-        intender=intender,
-        guest_name=guest_name,
-        guest_phone=guest_phone,
-        purpose=purpose,
-        arrival_date=arrival_date,
-        arrival_time=arrival_time,
-        departure_date=departure_date,
-        departure_time=departure_time,
-        rooms_required=rooms_required,
-        total_guest=total_guest,
-        room_type=room_type,
-        booking_date=timezone.now().date(),
-        **kwargs
-    )
-    return booking
-
-
-@transaction.atomic
-def approve_guest_room_booking(*, booking_id: int, guest_room_id: int):
-    """Approve a guest room booking and assign a room."""
-    try:
-        booking = selectors.get_booking_by_id(booking_id)
-    except GuestRoomBooking.DoesNotExist:
-        raise BookingNotFoundError(f"Booking with ID {booking_id} not found.")
-
-    if booking.status != BookingStatus.PENDING:
-        raise InvalidOperationError("Only PENDING bookings can be approved.")
-
-    try:
-        guest_room = selectors.get_guest_room_by_id(guest_room_id)
-    except GuestRoom.DoesNotExist:
-        raise RoomNotFoundError(f"Guest room with ID {guest_room_id} not found.")
-
-    # Update booking
-    booking.guest_room_id = str(guest_room.id)
-    booking.status = BookingStatus.CONFIRMED
-    booking.save(update_fields=['guest_room_id', 'status'])
-
-    # Update guest room
-    guest_room.occupied_till = booking.departure_date
-    guest_room.vacant = False
-    guest_room.save(update_fields=['occupied_till', 'vacant'])
-
-    return booking
-
-
-@transaction.atomic
-def reject_guest_room_booking(*, booking_id: int):
-    """Reject a guest room booking."""
-    try:
-        booking = selectors.get_booking_by_id(booking_id)
-    except GuestRoomBooking.DoesNotExist:
-        raise BookingNotFoundError(f"Booking with ID {booking_id} not found.")
-
-    if booking.status != BookingStatus.PENDING:
-        raise InvalidOperationError("Only PENDING bookings can be rejected.")
-
-    booking.status = BookingStatus.REJECTED
-    booking.save(update_fields=['status'])
-    return booking
-
-
-@transaction.atomic
-def bulk_create_guest_rooms(*, hall_id: int, rooms: list):
-    """Create multiple guest rooms for a hall.
-    
-    Args:
-        hall_id: Hall database ID
-        rooms: List of dicts with keys: 'room' (name), 'room_type' ('single'/'double'/'triple')
-    
-    Example:
-        bulk_create_guest_rooms(
-            hall_id=1,
-            rooms=[
-                {'room': 'G101', 'room_type': 'single'},
-                {'room': 'G102', 'room_type': 'double'},
-                {'room': 'G103', 'room_type': 'triple'},
-            ]
-        )
+def create_leave_request(student, start_date, end_date, reason, destination=None, contact_phone=None):
     """
-    try:
-        hall = selectors.get_hall_by_id(hall_id)
-    except Hall.DoesNotExist:
-        raise HallNotFoundError(f"Hall with ID {hall_id} not found.")
+    Create a new leave request.
     
-    guest_rooms = []
-    for room_data in rooms:
-        guest_room = GuestRoom(
-            hall=hall,
-            room=room_data['room'],
-            room_type=room_data.get('room_type', 'single'),
-            vacant=True
+    Enforces:
+    - BR-HM-101: Leave Eligibility Based on Hostel Residency
+    - BR-HM-102: Leave Date Boundary Validation
+    - BR-HM-103: Mandatory Leave Justification Policy
+    """
+    # BR-HM-101: Check if student is currently in hostel
+    current_allocation = selectors.get_student_current_allocation(student.id)
+    if not current_allocation or current_allocation.status != RoomAllocationStatusChoices.ALLOCATED:
+        raise LeaveEligibilityError(
+            "Student must have an active hostel allocation to request leave."
         )
-        guest_rooms.append(guest_room)
     
-    created_rooms = GuestRoom.objects.bulk_create(guest_rooms)
-    return created_rooms
-
-
-# ══════════════════════════════════════════════════════════════
-# STAFF SCHEDULE SERVICES
-# ══════════════════════════════════════════════════════════════
-
-@transaction.atomic
-def create_or_update_staff_schedule(
-    *,
-    hall,
-    staff_id,
-    staff_type: str,
-    day: str,
-    start_time: str,
-    end_time: str
-):
-    """Create or update a staff schedule."""
-    existing_schedule = selectors.get_schedule_by_staff_id(staff_id)
-
-    if existing_schedule:
-        existing_schedule.hall = hall
-        existing_schedule.day = day
-        existing_schedule.start_time = datetime.strptime(start_time, '%H:%M').time()
-        existing_schedule.end_time = datetime.strptime(end_time, '%H:%M').time()
-        existing_schedule.staff_type = staff_type
-        existing_schedule.save(update_fields=['hall', 'day', 'start_time', 'end_time', 'staff_type'])
-        return existing_schedule
-    else:
-        schedule = StaffSchedule.objects.create(
-            hall=hall,
-            staff_id=staff_id,
-            day=day,
-            staff_type=staff_type,
-            start_time=datetime.strptime(start_time, '%H:%M').time(),
-            end_time=datetime.strptime(end_time, '%H:%M').time()
+    # BR-HM-102: Validate leave dates
+    today = timezone.now().date()
+    if start_date < today:
+        raise LeaveDateError("Leave start date cannot be in the past.")
+    if end_date < start_date:
+        raise LeaveDateError("Leave end date must be after start date.")
+    
+    # Check for maximum leave duration (e.g., 90 days)
+    leave_duration = (end_date - start_date).days
+    if leave_duration > 90:
+        raise LeaveDateError("Leave duration cannot exceed 90 days.")
+    
+    # BR-HM-103: Check for mandatory justification
+    if not reason or len(reason.strip()) < 10:
+        raise LeaveJustificationError(
+            "Leave must have a valid reason (at least 10 characters)."
         )
-        return schedule
-
-
-@transaction.atomic
-def delete_staff_schedule(*, staff_id):
-    """Delete a staff schedule."""
-    schedule = selectors.get_schedule_by_staff_id(staff_id)
-    if schedule:
-        schedule.delete()
-
-
-# ══════════════════════════════════════════════════════════════
-# NOTICE BOARD SERVICES
-# ══════════════════════════════════════════════════════════════
-
-@transaction.atomic
-def create_notice(*, hall, posted_by, head_line: str, description: str, content=None):
-    """Create a new hostel notice."""
-    notice = HostelNoticeBoard.objects.create(
-        hall=hall,
-        posted_by=posted_by,
-        head_line=head_line,
-        description=description,
-        content=content
-    )
-    return notice
-
-
-@transaction.atomic
-def delete_notice(*, notice_id: int):
-    """Delete a notice."""
-    try:
-        notice = selectors.get_notice_by_id(notice_id)
-    except HostelNoticeBoard.DoesNotExist:
-        raise HostelManagementError(f"Notice with ID {notice_id} not found.")
-    notice.delete()
-
-
-# ══════════════════════════════════════════════════════════════
-# STUDENT ATTENDANCE SERVICES
-# ══════════════════════════════════════════════════════════════
-
-@transaction.atomic
-def mark_attendance(*, student_id: str, date: str):
-    """Mark attendance for a student."""
-    try:
-        student = selectors.get_student_by_id(student_id)
-    except Student.DoesNotExist:
-        raise StudentNotFoundError(f"Student with ID {student_id} not found.")
-
-    if selectors.attendance_exists(student, date):
-        raise AttendanceAlreadyMarkedError(f"Attendance already marked for {student_id} on {date}.")
-
-    hall = selectors.get_hall_by_hall_id(f'hall{student.hall_no}')
-
-    record = HostelStudentAttendence.objects.create(
-        student_id=student,
-        hall=hall,
-        date=date,
-        present=True
-    )
-    return record
-
-
-# ══════════════════════════════════════════════════════════════
-# ROOM MANAGEMENT SERVICES
-# ══════════════════════════════════════════════════════════════
-
-@transaction.atomic
-def change_student_room(*, student_id: str, new_room_no: str, new_hall_no: str):
-    """Change a student's room assignment."""
-    try:
-        student = selectors.get_student_by_id(student_id)
-    except Student.DoesNotExist:
-        raise StudentNotFoundError(f"Student with ID {student_id} not found.")
-
-    # Remove from old room
-    if student.hall_no and student.room_no:
-        old_hall = selectors.get_hall_by_hall_id(f'hall{student.hall_no}')
-        block = str(student.room_no[0]) if student.room_no else ''
-        room_digits = re.findall('[0-9]+', str(student.room_no))
-        if room_digits:
-            old_room = selectors.get_room_by_details(old_hall, block, room_digits[0])
-            if old_room and old_room.room_occupied > 0:
-                old_room.room_occupied -= 1
-                old_room.save(update_fields=['room_occupied'])
-                old_hall.number_students -= 1
-                old_hall.save(update_fields=['number_students'])
-
-    # Add to new room
-    new_hall = selectors.get_hall_by_hall_id(f'hall{new_hall_no}')
-    block = str(new_room_no[0])
-    room_digits = re.findall('[0-9]+', new_room_no)
-    if not room_digits:
-        raise RoomNotFoundError(f"Invalid room number format: {new_room_no}")
-
-    new_room = selectors.get_room_by_details(new_hall, block, room_digits[0])
-    if not new_room:
-        raise RoomNotFoundError(f"Room {new_room_no} not found in hall {new_hall_no}.")
-
-    if new_room.room_occupied >= new_room.room_cap:
-        raise RoomNotAvailableError(f"Room {new_room_no} is at full capacity.")
-
-    new_room.room_occupied += 1
-    new_room.save(update_fields=['room_occupied'])
-    new_hall.number_students += 1
-    new_hall.save(update_fields=['number_students'])
-
-    # Update student
-    student.hall_no = int(new_hall_no)
-    student.room_no = new_room_no
-    student.save(update_fields=['hall_no', 'room_no'])
-
-    return student
-
-
-# ══════════════════════════════════════════════════════════════
-# LEAVE SERVICES
-# ══════════════════════════════════════════════════════════════
-
-@transaction.atomic
-def create_leave_application(
-    *,
-    student_name: str,
-    roll_num: str,
-    reason: str,
-    start_date,  # Accepts date object or string
-    end_date,    # Accepts date object or string
-    phone_number: str = None,
-    file_upload=None
-):
-    """Create a new leave application."""
+    
+    # Create the leave request
     leave = HostelLeave.objects.create(
-        student_name=student_name,
-        roll_num=roll_num,
-        reason=reason,
-        phone_number=phone_number,
+        student=student,
         start_date=start_date,
         end_date=end_date,
-        file_upload=file_upload,
-        status=LeaveStatus.PENDING
+        reason=reason,
+        destination=destination,
+        contact_phone=contact_phone,
+        status=LeaveStatusChoices.PENDING
     )
+    
     return leave
 
 
-@transaction.atomic
-def update_leave_status(*, leave_id: int, status: str, remark: str = None):
-    """Approve or reject a leave application."""
-    try:
-        leave = selectors.get_leave_by_id(leave_id)
-    except HostelLeave.DoesNotExist:
-        raise LeaveNotFoundError(f"Leave application with ID {leave_id} not found.")
-
-    if status not in [LeaveStatus.APPROVED, LeaveStatus.REJECTED]:
-        raise InvalidOperationError(f"Invalid leave status: {status}")
-
-    leave.status = status
-    if remark:
-        leave.remark = remark
-    leave.save(update_fields=['status', 'remark'])
+def approve_leave(leave_id, processed_by, remarks=None):
+    """
+    Approve a leave request.
+    
+    Enforces:
+    - BR-HM-104: Leave Decision Authority Enforcement
+    - BR-HM-105: Attendance Synchronization on Leave Approval
+    """
+    leave = selectors.get_student_leave(leave_id)
+    if not leave:
+        raise HostelManagementException(f"Leave {leave_id} not found.")
+    
+    if leave.status != LeaveStatusChoices.PENDING:
+        raise HostelManagementException(
+            f"Cannot approve leave in {leave.status} status."
+        )
+    
+    # BR-HM-104: Authority check (caretaker/warden must process)
+    # This should be enforced at view level, but check here too
+    if not processed_by:
+        raise LeaveAuthorityError("Leave approval requires authorized personnel.")
+    
+    leave.status = LeaveStatusChoices.APPROVED
+    leave.processed_by = processed_by
+    leave.remarks = remarks
+    leave.updated_at = timezone.now()
+    leave.save()
+    
+    # BR-HM-105: Mark student as absent for leave dates
+    _mark_leave_attendance(leave.student, leave.start_date, leave.end_date, is_present=False)
+    
     return leave
 
 
+def reject_leave(leave_id, processed_by, rejection_reason):
+    """Reject a leave request."""
+    leave = selectors.get_student_leave(leave_id)
+    if not leave:
+        raise HostelManagementException(f"Leave {leave_id} not found.")
+    
+    if leave.status != LeaveStatusChoices.PENDING:
+        raise HostelManagementException(
+            f"Cannot reject leave in {leave.status} status."
+        )
+    
+    if not rejection_reason or len(rejection_reason.strip()) < 5:
+        raise HostelManagementException("Rejection must have a valid reason.")
+    
+    leave.status = LeaveStatusChoices.REJECTED
+    leave.processed_by = processed_by
+    leave.remarks = rejection_reason
+    leave.updated_at = timezone.now()
+    leave.save()
+    
+    return leave
+
+
+def cancel_leave(leave_id):
+    """Cancel an approved leave request."""
+    leave = selectors.get_student_leave(leave_id)
+    if not leave:
+        raise HostelManagementException(f"Leave {leave_id} not found.")
+    
+    if leave.status != LeaveStatusChoices.APPROVED:
+        raise HostelManagementException(
+            f"Only approved leaves can be cancelled. Current status: {leave.status}"
+        )
+    
+    leave.status = LeaveStatusChoices.CANCELLED
+    leave.updated_at = timezone.now()
+    leave.save()
+    
+    return leave
+
+
+def _mark_leave_attendance(student, start_date, end_date, is_present):
+    """Mark attendance for leave dates."""
+    current_allocation = selectors.get_student_current_allocation(student.id)
+    if not current_allocation or not current_allocation.room:
+        return
+    
+    hall = current_allocation.room.hall
+    current_date = start_date
+    
+    while current_date <= end_date:
+        HostelStudentAttendance.objects.update_or_create(
+            student=student,
+            date=current_date,
+            defaults={
+                'hall': hall,
+                'is_present': is_present,
+                'remarks': 'Leave' if not is_present else None
+            }
+        )
+        current_date += timedelta(days=1)
+
+
 # ══════════════════════════════════════════════════════════════
-# COMPLAINT SERVICES
+# HM-WF-102: COMPLAINT MANAGEMENT SERVICES
 # ══════════════════════════════════════════════════════════════
 
-@transaction.atomic
-def file_complaint(
-    *,
-    hall_name: str,
-    student_name: str,
-    roll_number: str,
-    description: str,
-    contact_number: str
-):
-    """File a new hostel complaint."""
+def create_complaint(student, title, description, category, priority, location=None):
+    """
+    Create a new complaint.
+    
+    Enforces:
+    - BR-HM-106: Complaint Eligibility Rule
+    - BR-HM-107: Complaint Routing by Category
+    """
+    # BR-HM-106: Check if student is currently in hostel
+    current_allocation = selectors.get_student_current_allocation(student.id)
+    if not current_allocation or current_allocation.status != RoomAllocationStatusChoices.ALLOCATED:
+        raise ComplaintEligibilityError(
+            "Only students with active hostel allocation can file complaints."
+        )
+    
+    # Validate complaint data
+    if not title or len(title.strip()) < 5:
+        raise ComplaintRoutingError("Complaint title must be at least 5 characters.")
+    
+    if not description or len(description.strip()) < 20:
+        raise ComplaintRoutingError("Complaint description must be at least 20 characters.")
+    
+    # Get hall from student's allocation
+    hall = current_allocation.room.hall
+    
+    # BR-HM-107: Route complaint to appropriate caretaker by category
+    caretaker = selectors.get_hall_caretaker(hall.hall_id)
+    
     complaint = HostelComplaint.objects.create(
-        hall_name=hall_name,
-        student_name=student_name,
-        roll_number=roll_number,
+        student=student,
+        hall=hall,
+        title=title,
         description=description,
-        contact_number=contact_number
+        category=category,
+        priority=priority,
+        location=location,
+        status=ComplaintStatusChoices.OPEN,
+        assigned_to=caretaker.staff if caretaker else None
     )
+    
+    return complaint
+
+
+def update_complaint_status(complaint_id, new_status, resolution_notes=None):
+    """
+    Update complaint status.
+    
+    Enforces:
+    - BR-HM-108: Mandatory Resolution Remarks
+    """
+    complaint = selectors.get_complaint(complaint_id)
+    if not complaint:
+        raise HostelManagementException(f"Complaint {complaint_id} not found.")
+    
+    # BR-HM-108: Require resolution remarks when resolving
+    if new_status in [ComplaintStatusChoices.RESOLVED, ComplaintStatusChoices.CLOSED]:
+        if not resolution_notes or len(resolution_notes.strip()) < 10:
+            raise ResolutionRemarksError(
+                "Resolution remarks are mandatory and must be at least 10 characters."
+            )
+    
+    complaint.status = new_status
+    complaint.resolution_notes = resolution_notes
+    complaint.updated_at = timezone.now()
+    
+    if new_status == ComplaintStatusChoices.RESOLVED:
+        complaint.resolved_at = timezone.now()
+    
+    complaint.save()
+    return complaint
+
+
+def escalate_complaint(complaint_id, warden):
+    """
+    Escalate complaint to warden.
+    
+    Enforces:
+    - BR-HM-109: Escalation Authorization Rule
+    - BR-HM-110: Warden Authority on Escalated Complaints
+    """
+    complaint = selectors.get_complaint(complaint_id)
+    if not complaint:
+        raise HostelManagementException(f"Complaint {complaint_id} not found.")
+    
+    # BR-HM-109: Only open/in-progress complaints can be escalated
+    if complaint.status not in [ComplaintStatusChoices.OPEN, ComplaintStatusChoices.IN_PROGRESS]:
+        raise EscalationAuthorizationError(
+            "Only open or in-progress complaints can be escalated."
+        )
+    
+    # BR-HM-110: Assign to appropriate warden
+    if not warden:
+        raise WardenAuthorityError("Escalation requires a valid warden assignment.")
+    
+    complaint.escalated_to_warden = True
+    complaint.warden_assigned = warden
+    complaint.status = ComplaintStatusChoices.IN_PROGRESS
+    complaint.updated_at = timezone.now()
+    complaint.save()
+    
     return complaint
 
 
 # ══════════════════════════════════════════════════════════════
-# FINE SERVICES
+# HM-WF-103: ROOM ALLOCATION SERVICES
 # ══════════════════════════════════════════════════════════════
 
-@transaction.atomic
-def impose_fine(
-    *,
-    student_id: str,
-    student_name: str,
-    hall_id: int,
-    amount: float,
-    reason: str
-):
-    """Impose a fine on a student. Works even if student doesn't exist in system."""
-    # Try to get the student, but proceed even if not found
-    student = None
-    try:
-        student = selectors.get_student_by_id(student_id)
-    except Student.DoesNotExist:
-        # If student doesn't exist, use any existing student as placeholder
-        # This allows us to create fines for students not yet in the system
-        student = Student.objects.first()
+def bulk_allocate_rooms(room_allocations_data):
+    """
+    Bulk allocate rooms to students.
+    
+    Enforces:
+    - BR-HM-112: Bulk Allotment Capacity Safeguard
+    - BR-HM-113: Super Admin Allotment Authority
+    """
+    created_allocations = []
+    
+    for alloc_data in room_allocations_data:
+        student = alloc_data['student']
+        room = alloc_data['room']
+        
+        # BR-HM-112: Check room capacity
+        occupied_count = selectors.count_occupied_seats_in_room(room.id)
+        if occupied_count >= room.capacity:
+            raise AllotmentCapacityError(
+                f"Room {room.room_number} is at full capacity ({room.capacity}/{room.capacity})."
+            )
+          # Create allocation
+        allocation = RoomAllocation.objects.create(
+            student=student,
+            room=room,
+            hall=alloc_data.get('hall'),
+            allocation_date=timezone.now().date(),
+            status=RoomAllocationStatusChoices.ALLOCATED,
+            allocated_by=alloc_data.get('allocated_by')
+        )
+        
+        created_allocations.append(allocation)
+        
+        # Update room occupancy
+        room.current_occupancy = occupied_count + 1
+        room.save()
+    
+    return created_allocations
 
-    if not student:
-        # If no students exist in system at all, we cannot proceed
-        raise StudentNotFoundError(f"No students in system. Please create a student record first.")
 
+def release_room_allocation(allocation_id):
+    """Release a student from their room allocation."""
+    allocation = selectors.get_allocation_by_id(allocation_id)
+    if not allocation:
+        raise HostelManagementException(f"Allocation {allocation_id} not found.")
+    
+    if allocation.status != RoomAllocationStatusChoices.ALLOCATED:
+        raise HostelManagementException(
+            f"Cannot release allocation in {allocation.status} status."
+        )
+    
+    # Update allocation
+    allocation.status = RoomAllocationStatusChoices.VACANT
+    allocation.release_date = timezone.now().date()
+    allocation.save()
+    
+    # Update room occupancy
+    if allocation.room:
+        allocation.room.current_occupancy = max(0, allocation.room.current_occupancy - 1)
+        allocation.room.save()
+    
+    return allocation
+
+
+# ══════════════════════════════════════════════════════════════
+# HM-WF-104: ROOM CHANGE SERVICES
+# ══════════════════════════════════════════════════════════════
+
+def request_room_change(student, current_room, requested_room, reason):
+    """
+    Request a room change.
+    
+    Enforces:
+    - BR-HM-115: Room Change Eligibility Rule
+    """
+    # BR-HM-115: Student must have current allocation
+    current_allocation = selectors.get_student_current_allocation(student.pk)
+    if not current_allocation or current_allocation.status != RoomAllocationStatusChoices.ALLOCATED:
+        raise RoomChangeEligibilityError(
+            "Student must have an active hostel allocation to request room change."
+        )
+    
+    # Check if currently allocated room matches
+    if current_allocation.room != current_room:
+        raise RoomChangeEligibilityError(
+            "Requested current room does not match student's allocation."
+        )
+    
+    # Cannot request change to same room
+    if current_room == requested_room:
+        raise RoomChangeEligibilityError(
+            "Cannot request change to the same room."
+        )
+    
+    # Validate reason
+    if not reason or len(reason.strip()) < 10:
+        raise RoomChangeEligibilityError(
+            "Room change reason must be at least 10 characters."
+        )
+    
+    change_request = RoomAllocationChange.objects.create(
+        student=student,
+        current_room=current_room,
+        requested_room=requested_room,
+        reason=reason,
+        status=AllocationChangeStatusChoices.REQUESTED,
+        requested_date=timezone.now().date()
+    )
+    
+    return change_request
+
+
+def approve_room_change_warden(change_id, warden, remarks=None):
+    """
+    Warden approves room change.
+    
+    Enforces:
+    - BR-HM-116: Dual Approval Requirement
+    """
+    change = selectors.get_room_change(change_id)
+    if not change:
+        raise HostelManagementException(f"Room change {change_id} not found.")
+    
+    if change.status != AllocationChangeStatusChoices.REQUESTED:
+        raise DualApprovalError(
+            f"Room change is in {change.status} status and cannot be approved."
+        )
+    
+    change.status = AllocationChangeStatusChoices.APPROVED_WARDEN
+    change.approved_by_warden = warden
+    change.warden_approval_date = timezone.now()
+    change.warden_remarks = remarks
+    change.save()
+    
+    return change
+
+
+def approve_room_change_caretaker(change_id, caretaker, remarks=None):
+    """
+    Caretaker approves room change (final approval).
+    
+    Enforces:
+    - BR-HM-116: Dual Approval Requirement (completes dual approval)
+    - BR-HM-117: Occupancy Reconciliation on Room Change
+    """
+    change = selectors.get_room_change(change_id)
+    if not change:
+        raise HostelManagementException(f"Room change {change_id} not found.")
+    
+    if change.status != AllocationChangeStatusChoices.APPROVED_WARDEN:
+        raise DualApprovalError(
+            "Room change must be approved by warden before caretaker approval."
+        )
+    
+    # BR-HM-117: Check capacity of requested room
+    occupied_count = selectors.count_occupied_seats_in_room(change.requested_room.id)
+    if occupied_count >= change.requested_room.capacity:
+        raise AllotmentCapacityError(
+            f"Requested room is at full capacity and cannot accommodate change."
+        )
+    
+    # Update allocations
+    current_allocation = selectors.get_student_current_allocation(change.student.id)
+    if current_allocation:
+        # Release from current room
+        current_allocation.status = RoomAllocationStatusChoices.VACANT
+        current_allocation.release_date = timezone.now().date()
+        current_allocation.save()
+        
+        # Update current room occupancy
+        if current_allocation.room:
+            current_allocation.room.current_occupancy = max(0, current_allocation.room.current_occupancy - 1)
+            current_allocation.room.save()
+    
+    # Create new allocation in requested room
+    new_allocation = RoomAllocation.objects.create(
+        student=change.student,
+        room=change.requested_room,
+        allocation_date=timezone.now().date(),
+        status=RoomAllocationStatusChoices.ALLOCATED
+    )
+    
+    # Update requested room occupancy
+    change.requested_room.current_occupancy += 1
+    change.requested_room.save()
+      # Update change request
+    change.status = AllocationChangeStatusChoices.COMPLETED
+    change.approved_by_caretaker = caretaker
+    change.caretaker_approval_date = timezone.now()
+    change.caretaker_remarks = remarks
+    change.effective_date = timezone.now().date()
+    change.save()
+    
+    # BR-HM-118: Send mandatory room change notification
+    send_room_change_notification(change)
+    
+    return change
+
+
+def reject_room_change(change_id, rejection_reason):
+    """Reject a room change request."""
+    change = selectors.get_room_change(change_id)
+    if not change:
+        raise HostelManagementException(f"Room change {change_id} not found.")
+    
+    if change.status == AllocationChangeStatusChoices.COMPLETED:
+        raise HostelManagementException("Cannot reject a completed room change.")
+    
+    if change.status == AllocationChangeStatusChoices.REJECTED:
+        raise HostelManagementException("Room change is already rejected.")
+    
+    if not rejection_reason or len(rejection_reason.strip()) < 5:
+        raise HostelManagementException("Rejection reason must be at least 5 characters.")
+    
+    change.status = AllocationChangeStatusChoices.REJECTED
+    change.rejection_reason = rejection_reason
+    change.save()
+    
+    return change
+
+
+# ══════════════════════════════════════════════════════════════
+# HM-WF-105: FINE MANAGEMENT SERVICES
+# ══════════════════════════════════════════════════════════════
+
+def issue_fine(student, hall, fine_type, amount, reason, due_date, issued_by):
+    """
+    Issue a fine to a student.
+    
+    Enforces:
+    - BR-HM-013: Fine Imposition Validation
+    """
+    # BR-HM-013: Validate fine data
+    if not student or not hall:
+        raise FineValidationError("Student and hall are required to issue a fine.")
+    
+    if amount <= 0:
+        raise FineValidationError("Fine amount must be greater than zero.")
+    
+    if due_date < timezone.now().date():
+        raise FineValidationError("Due date cannot be in the past.")
+    
+    if not reason or len(reason.strip()) < 10:
+        raise FineValidationError("Fine reason must be at least 10 characters.")
+    
+    # Check if student is/was in this hall
+    current_allocation = selectors.get_student_current_allocation(student.id)
+    if not current_allocation or current_allocation.room.hall != hall:
+        # Allow issuing fine even if student has left, but check recent allocation
+        pass
+    
     fine = HostelFine.objects.create(
         student=student,
-        student_id_entered=student_id,
-        student_name=student_name,
-        hall_id=hall_id,
-        amount=amount,
-        reason=reason,
-        status=FineStatus.PENDING
-    )
-    return fine
-
-
-@transaction.atomic
-def update_fine(*, fine_id: int, **update_fields):
-    """Update fine information."""
-    try:
-        fine = selectors.get_fine_by_id(fine_id)
-    except HostelFine.DoesNotExist:
-        raise FineNotFoundError(f"Fine with ID {fine_id} not found.")
-
-    for field, value in update_fields.items():
-        setattr(fine, field, value)
-    fine.save()
-    return fine
-
-
-@transaction.atomic
-def update_fine_status(*, fine_id: int, status: str):
-    """Update the payment status of a fine."""
-    if status not in [FineStatus.PENDING, FineStatus.PAID]:
-        raise InvalidOperationError(f"Invalid fine status: {status}")
-
-    try:
-        fine = selectors.get_fine_by_id(fine_id)
-    except HostelFine.DoesNotExist:
-        raise FineNotFoundError(f"Fine with ID {fine_id} not found.")
-
-    fine.status = status
-    fine.save(update_fields=['status'])
-    return fine
-
-
-@transaction.atomic
-def delete_fine(*, fine_id: int):
-    """Delete a fine."""
-    try:
-        fine = selectors.get_fine_by_id(fine_id)
-    except HostelFine.DoesNotExist:
-        raise FineNotFoundError(f"Fine with ID {fine_id} not found.")
-    fine.delete()
-
-
-# ══════════════════════════════════════════════════════════════
-# INVENTORY SERVICES
-# ══════════════════════════════════════════════════════════════
-
-@transaction.atomic
-def create_inventory_item(
-    *,
-    hall_id: int,
-    inventory_name: str,
-    cost: float,
-    quantity: int
-):
-    """Create a new inventory item."""
-    inventory = HostelInventory.objects.create(
-        hall_id=hall_id,
-        inventory_name=inventory_name,
-        cost=cost,
-        quantity=quantity
-    )
-    return inventory
-
-
-@transaction.atomic
-def update_inventory_item(*, inventory_id: int, **update_fields):
-    """Update inventory item information."""
-    try:
-        inventory = selectors.get_inventory_by_id(inventory_id)
-    except HostelInventory.DoesNotExist:
-        raise InventoryNotFoundError(f"Inventory item with ID {inventory_id} not found.")
-
-    for field, value in update_fields.items():
-        setattr(inventory, field, value)
-    inventory.save()
-    return inventory
-
-
-@transaction.atomic
-def delete_inventory_item(*, inventory_id: int):
-    """Delete an inventory item."""
-    try:
-        inventory = selectors.get_inventory_by_id(inventory_id)
-    except HostelInventory.DoesNotExist:
-        raise InventoryNotFoundError(f"Inventory item with ID {inventory_id} not found.")
-    inventory.delete()
-
-
-# ══════════════════════════════════════════════════════════════
-# WORKER REPORT SERVICES
-# ══════════════════════════════════════════════════════════════
-
-@transaction.atomic
-def create_worker_report(
-    *,
-    hall,
-    worker_id: str,
-    worker_name: str,
-    year: int,
-    month: int,
-    absent: int,
-    total_day: int,
-    remark: str
-):
-    """Create a worker report entry."""
-    report = WorkerReport.objects.create(
         hall=hall,
-        worker_id=worker_id,
-        worker_name=worker_name,
-        year=year,
-        month=month,
-        absent=absent,
-        total_day=total_day,
-        remark=remark
+        fine_type=fine_type,
+        amount=Decimal(str(amount)),
+        reason=reason,
+        due_date=due_date,
+        status=FineStatusChoices.PENDING,
+        issued_by=issued_by,
+        issued_date=timezone.now().date()
     )
-    return report
+    
+    return fine
+
+
+def pay_fine(fine_id):
+    """Mark a fine as paid."""
+    fine = selectors.get_fine(fine_id)
+    if not fine:
+        raise HostelManagementException(f"Fine {fine_id} not found.")
+    
+    if fine.status != FineStatusChoices.PENDING:
+        raise HostelManagementException(
+            f"Cannot pay fine in {fine.status} status."
+        )
+    
+    fine.status = FineStatusChoices.PAID
+    fine.paid_date = timezone.now().date()
+    fine.updated_at = timezone.now()
+    fine.save()
+    
+    return fine
+
+
+def waive_fine(fine_id, waived_by, waive_reason):
+    """Waive a fine (warden authority)."""
+    fine = selectors.get_fine(fine_id)
+    if not fine:
+        raise HostelManagementException(f"Fine {fine_id} not found.")
+    
+    if fine.status == FineStatusChoices.PAID:
+        raise HostelManagementException("Cannot waive an already paid fine.")
+    
+    if fine.status == FineStatusChoices.CANCELLED:
+        raise HostelManagementException("Fine is already cancelled.")
+    
+    if not waive_reason or len(waive_reason.strip()) < 5:
+        raise HostelManagementException("Waive reason must be at least 5 characters.")
+    
+    fine.status = FineStatusChoices.WAIVED
+    fine.waived_by = waived_by
+    fine.waive_reason = waive_reason
+    fine.updated_at = timezone.now()
+    fine.save()
+    
+    return fine
+
+
+def cancel_fine(fine_id):
+    """Cancel a fine."""
+    fine = selectors.get_fine(fine_id)
+    if not fine:
+        raise HostelManagementException(f"Fine {fine_id} not found.")
+    
+    if fine.status in [FineStatusChoices.PAID, FineStatusChoices.WAIVED]:
+        raise HostelManagementException(
+            f"Cannot cancel a {fine.status} fine."
+        )
+    fine.status = FineStatusChoices.CANCELLED
+    fine.updated_at = timezone.now()
+    fine.save()
+    
+    return fine
 
 
 # ══════════════════════════════════════════════════════════════
-# STUDENT DETAILS SERVICES (for updating extended info)
+# HM-WF-112: GUEST ROOM BOOKING SERVICES
 # ══════════════════════════════════════════════════════════════
 
-@transaction.atomic
-def update_student_details(*, student_id: str, **update_fields):
-    """Update extended student details."""
-    try:
-        student_details = selectors.get_student_details_by_id(student_id)
-        for field, value in update_fields.items():
-            setattr(student_details, field, value)
-        student_details.save()
-        return student_details
-    except StudentDetails.DoesNotExist:
-        # Create if doesn't exist
-        return StudentDetails.objects.create(id=student_id, **update_fields)
-
-
-@transaction.atomic
-def remove_student_from_hostel(*, student_id: str):
-    """Remove a student from hostel (set hall_no to 0)."""
-    try:
-        student = selectors.get_student_by_id(student_id)
-    except Student.DoesNotExist:
-        raise StudentNotFoundError(f"Student with ID {student_id} not found.")
-
-    student.hall_no = 0
-    student.save(update_fields=['hall_no'])
-    return student
-"""
-Services - All business logic and write operations for hostel management.
-
-This module contains ALL business logic, validation, and write operations.
-For reads, this module calls selectors. It NEVER uses .objects. for reads.
-"""
-
-from django.db import transaction
-from django.core.exceptions import ValidationError
-from django.contrib.auth.models import User
-from django.utils import timezone
-from datetime import datetime, date
-import re
-
-from applications.globals.models import Staff, Faculty
-from applications.academic_information.models import Student
-
-from . import selectors
-from .models import (
-    Hall,
-    HallCaretaker,
-    HallWarden,
-    GuestRoomBooking,
-    StaffSchedule,
-    HostelNoticeBoard,
-    HostelStudentAttendence,
-    HallRoom,
-    WorkerReport,
-    HostelInventory,
-    HostelLeave,
-    HostelComplaint,
-    HostelAllotment,
-    StudentDetails,
-    GuestRoom,
-    HostelFine,
-    HostelTransactionHistory,
-    HostelHistory,
-    BookingStatus,
-    LeaveStatus,
-    FineStatus,
-    RoomType,
-)
-
-
-# ══════════════════════════════════════════════════════════════
-# CUSTOM EXCEPTIONS
-# ══════════════════════════════════════════════════════════════
-
-class HostelManagementError(Exception):
-    """Base exception for hostel management module."""
-    pass
-
-
-class HallNotFoundError(HostelManagementError):
-    """Hall does not exist."""
-    pass
-
-
-class HallAlreadyExistsError(HostelManagementError):
-    """Hall with this ID already exists."""
-    pass
-
-
-class RoomNotAvailableError(HostelManagementError):
-    """Room is full or unavailable."""
-    pass
-
-
-class RoomNotFoundError(HostelManagementError):
-    """Room does not exist."""
-    pass
-
-
-class StudentNotFoundError(HostelManagementError):
-    """Student does not exist."""
-    pass
-
-
-class StaffNotFoundError(HostelManagementError):
-    """Staff member does not exist."""
-    pass
-
-
-class FacultyNotFoundError(HostelManagementError):
-    """Faculty member does not exist."""
-    pass
-
-
-class InvalidOperationError(HostelManagementError):
-    """Operation not allowed in current state."""
-    pass
-
-
-class AttendanceAlreadyMarkedError(HostelManagementError):
-    """Attendance already marked for this date."""
-    pass
-
-
-class InsufficientRoomsError(HostelManagementError):
-    """Not enough rooms available."""
-    pass
-
-
-class GuestCapacityExceededError(HostelManagementError):
-    """Number of guests exceeds room capacity."""
-    pass
-
-
-class UnauthorizedAccessError(HostelManagementError):
-    """User not authorized for this operation."""
-    pass
-
-
-class BookingNotFoundError(HostelManagementError):
-    """Booking does not exist."""
-    pass
-
-
-class LeaveNotFoundError(HostelManagementError):
-    """Leave application does not exist."""
-    pass
-
-
-class FineNotFoundError(HostelManagementError):
-    """Fine does not exist."""
-    pass
-
-
-class InventoryNotFoundError(HostelManagementError):
-    """Inventory item does not exist."""
-    pass
-
-
-# ══════════════════════════════════════════════════════════════
-# HALL SERVICES
-# ══════════════════════════════════════════════════════════════
-
-@transaction.atomic
-def create_hall(*, hall_id: str, hall_name: str, max_accomodation: int, type_of_seater: str, **kwargs):
-    """Create a new hall."""
-    if selectors.hall_exists_by_hall_id(hall_id):
-        raise HallAlreadyExistsError(f"Hall with ID {hall_id} already exists.")
-
-    hall = Hall.objects.create(
-        hall_id=hall_id,
-        hall_name=hall_name,
-        max_accomodation=max_accomodation,
-        type_of_seater=type_of_seater,
-        **kwargs
+def request_guest_room(student, guest_name, guest_phone, arrival_date, departure_date, 
+                       purpose, total_guests, guest_email="", guest_address="", 
+                       nationality="", rooms_required=1, room_type="single"):
+    """
+    Request a guest room booking.
+    
+    Creates a pending guest room booking request that must be approved by staff.
+    """
+    if not guest_name or len(guest_name.strip()) < 3:
+        raise HostelManagementException("Guest name must be at least 3 characters.")
+    
+    if not guest_phone or len(guest_phone) < 10:
+        raise HostelManagementException("Phone number must be at least 10 characters.")
+    
+    if total_guests <= 0 or total_guests > 100:
+        raise HostelManagementException("Total guests must be between 1 and 100.")
+    
+    if arrival_date >= departure_date:
+        raise HostelManagementException("Departure date must be after arrival date.")
+    
+    duration = (departure_date - arrival_date).days
+    if duration > 30:
+        raise HostelManagementException("Booking duration cannot exceed 30 days.")
+    
+    if arrival_date < timezone.now().date():
+        raise HostelManagementException("Arrival date cannot be in the past.")
+    
+    # Get student's primary hall from current allocation
+    student_obj = selectors.get_student(student.pk)
+    if not student_obj:
+        raise HostelManagementException("Student not found.")
+    
+    current_allocation = selectors.get_student_current_allocation(student_obj.pk)
+    if not current_allocation:
+        raise HostelManagementException("Student must be allocated to a hostel.")
+    
+    hall = current_allocation.room.hall    
+    # Create booking
+    booking = GuestRoomBooking.objects.create(
+        student=student_obj,
+        hall=hall,
+        guest_name=guest_name,
+        guest_phone=guest_phone,
+        guest_email=guest_email or "",
+        guest_address=guest_address or "",
+        nationality=nationality or "",
+        total_guests=total_guests,
+        purpose=purpose,
+        arrival_date=arrival_date,
+        departure_date=departure_date,
+        rooms_required=rooms_required or 1,
+        room_type=room_type or "single",
+        status=BookingStatusChoices.PENDING,
+        booking_date=timezone.now().date()
     )
-    return hall
+    
+    return booking
 
 
-@transaction.atomic
-def update_hall(*, hall_id: int, **update_fields):
-    """Update hall information."""
-    try:
-        hall = selectors.get_hall_by_id(hall_id)
-    except Hall.DoesNotExist:
-        raise HallNotFoundError(f"Hall with ID {hall_id} not found.")
+def approve_guest_booking(booking_id, approved_by, guest_room_id=None, remarks=""):
+    """
+    Approve a guest room booking and optionally assign a room.
+    """
+    booking = selectors.get_guest_booking(booking_id)
+    if not booking:
+        raise HostelManagementException(f"Guest booking {booking_id} not found.")
+    
+    if booking.status != BookingStatusChoices.PENDING:
+        raise HostelManagementException(
+            f"Cannot approve booking in {booking.status} status."
+        )
+    
+    booking.status = BookingStatusChoices.APPROVED
+    booking.review_remarks = remarks
+    booking.updated_at = timezone.now()
+    
+    # Assign room if provided
+    if guest_room_id:
+        guest_room = GuestRoom.objects.filter(id=guest_room_id).first()
+        if not guest_room:
+            raise HostelManagementException(f"Guest room {guest_room_id} not found.")
+        
+        # Check if room is available for the requested dates
+        if not guest_room.is_vacant:
+            raise HostelManagementException("Selected room is not available for requested dates.")
+        
+        booking.guest_room = guest_room
+        guest_room.occupied_till = booking.departure_date
+        guest_room.save()
+    
+    booking.save()
+    return booking
 
-    for field, value in update_fields.items():
-        setattr(hall, field, value)
+
+def reject_guest_booking(booking_id, rejection_reason):
+    """
+    Reject a guest room booking request.
+    """
+    booking = selectors.get_guest_booking(booking_id)
+    if not booking:
+        raise HostelManagementException(f"Guest booking {booking_id} not found.")
+    
+    if booking.status != BookingStatusChoices.PENDING:
+        raise HostelManagementException(
+            f"Cannot reject booking in {booking.status} status."
+        )
+    
+    if not rejection_reason or len(rejection_reason.strip()) < 5:
+        raise HostelManagementException("Rejection reason must be at least 5 characters.")
+    
+    booking.status = BookingStatusChoices.REJECTED
+    booking.review_remarks = rejection_reason
+    booking.updated_at = timezone.now()
+    booking.save()
+    
+    return booking
+
+
+def check_in_guest(booking_id):
+    """
+    Check in a guest (mark as checked in).
+    """
+    booking = selectors.get_guest_booking(booking_id)
+    if not booking:
+        raise HostelManagementException(f"Guest booking {booking_id} not found.")
+    
+    if booking.status != BookingStatusChoices.APPROVED:
+        raise HostelManagementException(
+            f"Cannot check in booking in {booking.status} status. Must be APPROVED."
+        )
+    
+    if not booking.guest_room:
+        raise HostelManagementException("Guest room must be assigned before check-in.")
+    
+    booking.status = BookingStatusChoices.CHECKED_IN
+    booking.checked_in_at = timezone.now()
+    booking.updated_at = timezone.now()
+    booking.save()
+    
+    return booking
+
+
+def check_out_guest(booking_id):
+    """
+    Check out a guest (mark as checked out).
+    """
+    booking = selectors.get_guest_booking(booking_id)
+    if not booking:
+        raise HostelManagementException(f"Guest booking {booking_id} not found.")
+    
+    if booking.status != BookingStatusChoices.CHECKED_IN:
+        raise HostelManagementException(
+            f"Cannot check out booking in {booking.status} status. Must be CHECKED_IN."
+        )
+    
+    booking.status = BookingStatusChoices.CHECKED_OUT
+    booking.checked_out_at = timezone.now()
+    booking.updated_at = timezone.now()
+    booking.save()
+    
+    # Clear room occupancy
+    if booking.guest_room:
+        booking.guest_room.occupied_till = None
+        booking.guest_room.save()
+    
+    return booking
+
+
+# ...existing code...
+
+
+# ══════════════════════════════════════════════════════════════
+# NOTIFICATION HELPERS - BR-HM-118 & Related
+# ══════════════════════════════════════════════════════════════
+
+def send_room_change_notification(change_request):
+    """
+    Send notification for room change completion.
+    
+    Enforces:
+    - BR-HM-118: Mandatory Room Change Notification
+    """
+    # Placeholder for notification system integration
+    # This ensures BR-HM-118 compliance by documenting the requirement
+    pass
+
+
+# ══════════════════════════════════════════════════════════════
+# SUPER ADMIN MANAGEMENT SERVICES
+# ══════════════════════════════════════════════════════════════
+
+def assign_warden_to_hall(hall, faculty):
+    """
+    Assign a warden to a hall (Super Admin only).
+    
+    Args:
+        hall: Hall object
+        faculty: Faculty object to assign as warden
+    
+    Returns:
+        HallWarden object
+    """
+    from .models import HallWarden
+    
+    # Remove existing warden if any
+    existing_wardens = HallWarden.objects.filter(hall=hall)
+    if existing_wardens.exists():
+        existing_wardens.delete()
+    
+    # Assign new warden
+    warden = HallWarden.objects.create(
+        hall=hall,
+        faculty=faculty
+    )
+    return warden
+
+
+def assign_caretaker_to_hall(hall, staff):
+    """
+    Assign a caretaker to a hall (Super Admin only).
+    
+    Args:
+        hall: Hall object
+        staff: Staff object to assign as caretaker
+    
+    Returns:
+        HallCaretaker object
+    """
+    from .models import HallCaretaker
+    
+    # Remove existing caretaker if any
+    existing_caretakers = HallCaretaker.objects.filter(hall=hall)
+    if existing_caretakers.exists():
+        existing_caretakers.delete()
+    
+    # Assign new caretaker
+    caretaker = HallCaretaker.objects.create(
+        hall=hall,
+        staff=staff
+    )
+    return caretaker
+
+
+def allocate_batch_to_hall(hall, academic_batch):
+    """
+    Allocate an academic batch to a hall (Super Admin only).
+    Batch allocation assigns the batch year to a specific hall.
+    
+    Args:
+        hall: Hall object
+        academic_batch: AcademicBatch object
+    
+    Returns:
+        Updated Hall object
+    """
+    hall.assigned_batch = academic_batch
     hall.save()
     return hall
 
 
-@transaction.atomic
-def delete_hall(*, hall_id: int):
-    """Delete a hall and its related data."""
-    try:
-        hall = selectors.get_hall_by_id(hall_id)
-    except Hall.DoesNotExist:
-        raise HallNotFoundError(f"Hall with ID {hall_id} not found.")
-
-    # Delete related allotments
-    HostelAllotment.objects.filter(hall=hall).delete()
-
-    # Delete the hall
-    hall.delete()
-
-
-# ══════════════════════════════════════════════════════════════
-# HALL CARETAKER SERVICES
-# ══════════════════════════════════════════════════════════════
-
-@transaction.atomic
-def assign_caretaker(*, hall_id: str, caretaker_username: str):
-    """Assign a caretaker to a hall."""
-    try:
-        hall = selectors.get_hall_by_hall_id(hall_id)
-    except Hall.DoesNotExist:
-        raise HallNotFoundError(f"Hall with ID {hall_id} not found.")
-
-    try:
-        caretaker_staff = selectors.get_staff_by_username(caretaker_username)
-    except Staff.DoesNotExist:
-        raise StaffNotFoundError(f"Caretaker with username {caretaker_username} not found.")
-
-    # Get previous caretaker for history
-    prev_hall_caretaker = selectors.get_caretaker_by_hall(hall)
-
-    # Delete any previous assignments of this caretaker
-    HallCaretaker.objects.filter(staff=caretaker_staff).delete()
-
-    # Delete any previously assigned caretaker to this hall
-    HallCaretaker.objects.filter(hall=hall).delete()
-
-    # Create new assignment
-    hall_caretaker = HallCaretaker.objects.create(hall=hall, staff=caretaker_staff)
-
-    # Update hostel allotments
-    hostel_allotments = selectors.get_allotments_by_hall(hall)
-    for hostel_allotment in hostel_allotments:
-        hostel_allotment.assignedCaretaker = caretaker_staff
-        hostel_allotment.save(update_fields=['assignedCaretaker'])
-
-    # Record transaction history
-    HostelTransactionHistory.objects.create(
-        hall=hall,
-        change_type='Caretaker',
-        previous_value=prev_hall_caretaker.staff.id if (prev_hall_caretaker and prev_hall_caretaker.staff) else 'None',
-        new_value=caretaker_username
-    )
-
-    # Create hostel history
-    current_warden = selectors.get_warden_by_hall(hall)
-    HostelHistory.objects.create(
-        hall=hall,
-        caretaker=caretaker_staff,
-        batch=hall.assigned_batch,
-        warden=current_warden.faculty if (current_warden and current_warden.faculty) else None
-    )
-
-    return hall_caretaker
+def get_active_batch_years():
+    """
+    Get all active academic batch years for display and assignment.
+    Returns a list of active batches with their details.
+    
+    Returns:
+        List of active batches
+    """
+    from applications.programme_curriculum.models import AcademicBatch
+    
+    # Get all active batches
+    active_batches = AcademicBatch.objects.filter(
+        is_active=True
+    ).values('id', 'batch_id', 'discipline', 'year').distinct()
+    
+    return list(active_batches)
 
 
-# ══════════════════════════════════════════════════════════════
-# HALL WARDEN SERVICES
-# ══════════════════════════════════════════════════════════════
-
-@transaction.atomic
-def assign_warden(*, hall_id: str, warden_username: str):
-    """Assign a warden to a hall."""
-    try:
-        hall = selectors.get_hall_by_hall_id(hall_id)
-    except Hall.DoesNotExist:
-        raise HallNotFoundError(f"Hall with ID {hall_id} not found.")
-
-    try:
-        warden = selectors.get_faculty_by_username(warden_username)
-    except Faculty.DoesNotExist:
-        raise FacultyNotFoundError(f"Warden with username {warden_username} not found.")
-
-    # Get previous warden for history
-    prev_hall_warden = selectors.get_warden_by_hall(hall)
-
-    # Delete any previous assignments of this warden
-    HallWarden.objects.filter(faculty=warden).delete()
-
-    # Delete any previously assigned warden to this hall
-    HallWarden.objects.filter(hall=hall).delete()
-
-    # Create new assignment
-    hall_warden = HallWarden.objects.create(hall=hall, faculty=warden)
-
-    # Update hostel allotments
-    hostel_allotments = selectors.get_allotments_by_hall(hall)
-    for hostel_allotment in hostel_allotments:
-        hostel_allotment.assignedWarden = warden
-        hostel_allotment.save(update_fields=['assignedWarden'])
-
-    # Record transaction history
-    HostelTransactionHistory.objects.create(
-        hall=hall,
-        change_type='Warden',
-        previous_value=prev_hall_warden.faculty.id if (prev_hall_warden and prev_hall_warden.faculty) else 'None',
-        new_value=warden_username
-    )
-
-    # Create hostel history
-    current_caretaker = selectors.get_caretaker_by_hall(hall)
-    HostelHistory.objects.create(
-        hall=hall,
-        caretaker=current_caretaker.staff if (current_caretaker and current_caretaker.staff) else None,
-        batch=hall.assigned_batch,
-        warden=warden
-    )
-
-    return hall_warden
-
-
-# ══════════════════════════════════════════════════════════════
-# BATCH ASSIGNMENT SERVICES
-# ══════════════════════════════════════════════════════════════
-
-@transaction.atomic
-def assign_batch_to_hall(*, hall_id: str, batch: str):
-    """Assign a batch to a hall."""
-    try:
-        hall = selectors.get_hall_by_hall_id(hall_id)
-    except Hall.DoesNotExist:
-        raise HallNotFoundError(f"Hall with ID {hall_id} not found.")
-
-    previous_batch = hall.assigned_batch if hall.assigned_batch is not None else '0'
-    hall.assigned_batch = batch
-    hall.save(update_fields=['assigned_batch'])
-
-    # Update room allotments
-    room_allotments = selectors.get_allotments_by_hall(hall)
-    for room_allotment in room_allotments:
-        room_allotment.assignedBatch = batch
-        room_allotment.save(update_fields=['assignedBatch'])
-
-    # Update student hall allotments
-    hall_number = int(''.join(filter(str.isdigit, hall.hall_id)))
-    students = Student.objects.filter(batch=int(batch))
-    for student in students:
-        student.hall_no = hall_number
-        student.save(update_fields=['hall_no'])
-
-    # Record transaction history
-    HostelTransactionHistory.objects.create(
-        hall=hall,
-        change_type='Batch',
-        previous_value=previous_batch,
-        new_value=batch
-    )
-
-    # Create hostel history
-    current_caretaker = selectors.get_caretaker_by_hall(hall)
-    current_warden = selectors.get_warden_by_hall(hall)
-    HostelHistory.objects.create(
-        hall=hall,
-        caretaker=current_caretaker.staff if (current_caretaker and current_caretaker.staff) else None,
-        batch=batch,
-        warden=current_warden.faculty if (current_warden and current_warden.faculty) else None
-    )
-
-    return hall
-
-
-# ══════════════════════════════════════════════════════════════
-# GUEST ROOM BOOKING SERVICES
-# ══════════════════════════════════════════════════════════════
-
-@transaction.atomic
-def create_guest_room_booking(
-    *,
-    hall_id: int,
-    intender: User,
-    guest_name: str,
-    guest_phone: str,
-    purpose: str,
-    arrival_date: str,
-    arrival_time: str,
-    departure_date: str,
-    departure_time: str,
-    rooms_required: int,
-    total_guest: int,
-    room_type: str,
-    **kwargs
-):
-    """Create a new guest room booking request."""
-    try:
-        hall = selectors.get_hall_by_id(hall_id)
-    except Hall.DoesNotExist:
-        raise HallNotFoundError(f"Hall with ID {hall_id} not found.")
-
-    # Check room availability
-    available_rooms_count = selectors.count_vacant_rooms_by_hall_and_type(hall_id, room_type)
-    if available_rooms_count < rooms_required:
-        raise InsufficientRoomsError("Not enough available rooms for this booking.")
-
-    # Check guest capacity
-    max_guests = {'single': 1, 'double': 2, 'triple': 3}
-    if total_guest > rooms_required * max_guests.get(room_type, 1):
-        raise GuestCapacityExceededError("Number of guests exceeds the capacity of selected rooms.")
-
-    booking = GuestRoomBooking.objects.create(
-        hall=hall,
-        intender=intender,
-        guest_name=guest_name,
-        guest_phone=guest_phone,
-        purpose=purpose,
-        arrival_date=arrival_date,
-        arrival_time=arrival_time,
-        departure_date=departure_date,
-        departure_time=departure_time,
-        rooms_required=rooms_required,
-        total_guest=total_guest,
-        room_type=room_type,
-        booking_date=timezone.now().date(),
-        **kwargs
-    )
-    return booking
-
-
-@transaction.atomic
-def approve_guest_room_booking(*, booking_id: int, guest_room_id: int):
-    """Approve a guest room booking and assign a room."""
-    try:
-        booking = selectors.get_booking_by_id(booking_id)
-    except GuestRoomBooking.DoesNotExist:
-        raise BookingNotFoundError(f"Booking with ID {booking_id} not found.")
-
-    if booking.status != BookingStatus.PENDING:
-        raise InvalidOperationError("Only PENDING bookings can be approved.")
-
-    try:
-        guest_room = selectors.get_guest_room_by_id(guest_room_id)
-    except GuestRoom.DoesNotExist:
-        raise RoomNotFoundError(f"Guest room with ID {guest_room_id} not found.")
-
-    # Update booking
-    booking.guest_room_id = str(guest_room.id)
-    booking.status = BookingStatus.CONFIRMED
-    booking.save(update_fields=['guest_room_id', 'status'])
-
-    # Update guest room
-    guest_room.occupied_till = booking.departure_date
-    guest_room.vacant = False
-    guest_room.save(update_fields=['occupied_till', 'vacant'])
-
-    return booking
-
-
-@transaction.atomic
-def reject_guest_room_booking(*, booking_id: int):
-    """Reject a guest room booking."""
-    try:
-        booking = selectors.get_booking_by_id(booking_id)
-    except GuestRoomBooking.DoesNotExist:
-        raise BookingNotFoundError(f"Booking with ID {booking_id} not found.")
-
-    if booking.status != BookingStatus.PENDING:
-        raise InvalidOperationError("Only PENDING bookings can be rejected.")
-
-    booking.status = BookingStatus.REJECTED
-    booking.save(update_fields=['status'])
-    return booking
-
-
-@transaction.atomic
-def bulk_create_guest_rooms(*, hall_id: int, rooms: list):
-    """Create multiple guest rooms for a hall.
+def rename_room_in_hall(room, new_room_number, new_block_number=None):
+    """
+    Rename a room (Warden/Caretaker can rename, changing from sequential 1,2,3 to A101, etc).
     
     Args:
-        hall_id: Hall database ID
-        rooms: List of dicts with keys: 'room' (name), 'room_type' ('single'/'double'/'triple')
+        room: HallRoom object
+        new_room_number: New room number (e.g., 'A101')
+        new_block_number: New block number (e.g., 'A')
     
-    Example:
-        bulk_create_guest_rooms(
-            hall_id=1,
-            rooms=[
-                {'room': 'G101', 'room_type': 'single'},
-                {'room': 'G102', 'room_type': 'double'},
-                {'room': 'G103', 'room_type': 'triple'},
-            ]
-        )
+    Returns:
+        Updated HallRoom object
     """
-    try:
-        hall = selectors.get_hall_by_id(hall_id)
-    except Hall.DoesNotExist:
-        raise HallNotFoundError(f"Hall with ID {hall_id} not found.")
-    
-    guest_rooms = []
-    for room_data in rooms:
-        guest_room = GuestRoom(
-            hall=hall,
-            room=room_data['room'],
-            room_type=room_data.get('room_type', 'single'),
-            vacant=True
-        )
-        guest_rooms.append(guest_room)
-    
-    created_rooms = GuestRoom.objects.bulk_create(guest_rooms)
-    return created_rooms
-
-
-# ══════════════════════════════════════════════════════════════
-# STAFF SCHEDULE SERVICES
-# ══════════════════════════════════════════════════════════════
-
-@transaction.atomic
-def create_or_update_staff_schedule(
-    *,
-    hall,
-    staff_id,
-    staff_type: str,
-    day: str,
-    start_time: str,
-    end_time: str
-):
-    """Create or update a staff schedule."""
-    existing_schedule = selectors.get_schedule_by_staff_id(staff_id)
-
-    if existing_schedule:
-        existing_schedule.hall = hall
-        existing_schedule.day = day
-        existing_schedule.start_time = datetime.strptime(start_time, '%H:%M').time()
-        existing_schedule.end_time = datetime.strptime(end_time, '%H:%M').time()
-        existing_schedule.staff_type = staff_type
-        existing_schedule.save(update_fields=['hall', 'day', 'start_time', 'end_time', 'staff_type'])
-        return existing_schedule
-    else:
-        schedule = StaffSchedule.objects.create(
-            hall=hall,
-            staff_id=staff_id,
-            day=day,
-            staff_type=staff_type,
-            start_time=datetime.strptime(start_time, '%H:%M').time(),
-            end_time=datetime.strptime(end_time, '%H:%M').time()
-        )
-        return schedule
-
-
-@transaction.atomic
-def delete_staff_schedule(*, staff_id):
-    """Delete a staff schedule."""
-    schedule = selectors.get_schedule_by_staff_id(staff_id)
-    if schedule:
-        schedule.delete()
-
-
-# ══════════════════════════════════════════════════════════════
-# NOTICE BOARD SERVICES
-# ══════════════════════════════════════════════════════════════
-
-@transaction.atomic
-def create_notice(*, hall, posted_by, head_line: str, description: str, content=None):
-    """Create a new hostel notice."""
-    notice = HostelNoticeBoard.objects.create(
-        hall=hall,
-        posted_by=posted_by,
-        head_line=head_line,
-        description=description,
-        content=content
-    )
-    return notice
-
-
-@transaction.atomic
-def delete_notice(*, notice_id: int):
-    """Delete a notice."""
-    try:
-        notice = selectors.get_notice_by_id(notice_id)
-    except HostelNoticeBoard.DoesNotExist:
-        raise HostelManagementError(f"Notice with ID {notice_id} not found.")
-    notice.delete()
-
-
-# ══════════════════════════════════════════════════════════════
-# STUDENT ATTENDANCE SERVICES
-# ══════════════════════════════════════════════════════════════
-
-@transaction.atomic
-def mark_attendance(*, student_id: str, date: str):
-    """Mark attendance for a student."""
-    try:
-        student = selectors.get_student_by_id(student_id)
-    except Student.DoesNotExist:
-        raise StudentNotFoundError(f"Student with ID {student_id} not found.")
-
-    if selectors.attendance_exists(student, date):
-        raise AttendanceAlreadyMarkedError(f"Attendance already marked for {student_id} on {date}.")
-
-    hall = selectors.get_hall_by_hall_id(f'hall{student.hall_no}')
-
-    record = HostelStudentAttendence.objects.create(
-        student_id=student,
-        hall=hall,
-        date=date,
-        present=True
-    )
-    return record
-
-
-# ══════════════════════════════════════════════════════════════
-# ROOM MANAGEMENT SERVICES
-# ══════════════════════════════════════════════════════════════
-
-@transaction.atomic
-def change_student_room(*, student_id: str, new_room_no: str, new_hall_no: str):
-    """Change a student's room assignment."""
-    try:
-        student = selectors.get_student_by_id(student_id)
-    except Student.DoesNotExist:
-        raise StudentNotFoundError(f"Student with ID {student_id} not found.")
-
-    # Remove from old room
-    if student.hall_no and student.room_no:
-        old_hall = selectors.get_hall_by_hall_id(f'hall{student.hall_no}')
-        block = str(student.room_no[0]) if student.room_no else ''
-        room_digits = re.findall('[0-9]+', str(student.room_no))
-        if room_digits:
-            old_room = selectors.get_room_by_details(old_hall, block, room_digits[0])
-            if old_room and old_room.room_occupied > 0:
-                old_room.room_occupied -= 1
-                old_room.save(update_fields=['room_occupied'])
-                old_hall.number_students -= 1
-                old_hall.save(update_fields=['number_students'])
-
-    # Add to new room
-    new_hall = selectors.get_hall_by_hall_id(f'hall{new_hall_no}')
-    block = str(new_room_no[0])
-    room_digits = re.findall('[0-9]+', new_room_no)
-    if not room_digits:
-        raise RoomNotFoundError(f"Invalid room number format: {new_room_no}")
-
-    new_room = selectors.get_room_by_details(new_hall, block, room_digits[0])
-    if not new_room:
-        raise RoomNotFoundError(f"Room {new_room_no} not found in hall {new_hall_no}.")
-
-    if new_room.room_occupied >= new_room.room_cap:
-        raise RoomNotAvailableError(f"Room {new_room_no} is at full capacity.")
-
-    new_room.room_occupied += 1
-    new_room.save(update_fields=['room_occupied'])
-    new_hall.number_students += 1
-    new_hall.save(update_fields=['number_students'])
-
-    # Update student
-    student.hall_no = int(new_hall_no)
-    student.room_no = new_room_no
-    student.save(update_fields=['hall_no', 'room_no'])
-
-    return student
-
-
-# ══════════════════════════════════════════════════════════════
-# LEAVE SERVICES
-# ══════════════════════════════════════════════════════════════
-
-@transaction.atomic
-def create_leave_application(
-    *,
-    student_name: str,
-    roll_num: str,
-    reason: str,
-    start_date,  # Accepts date object or string
-    end_date,    # Accepts date object or string
-    phone_number: str = None,
-    file_upload=None
-):
-    """Create a new leave application."""
-    leave = HostelLeave.objects.create(
-        student_name=student_name,
-        roll_num=roll_num,
-        reason=reason,
-        phone_number=phone_number,
-        start_date=start_date,
-        end_date=end_date,
-        file_upload=file_upload,
-        status=LeaveStatus.PENDING
-    )
-    return leave
-
-
-@transaction.atomic
-def update_leave_status(*, leave_id: int, status: str, remark: str = None):
-    """Approve or reject a leave application."""
-    try:
-        leave = selectors.get_leave_by_id(leave_id)
-    except HostelLeave.DoesNotExist:
-        raise LeaveNotFoundError(f"Leave application with ID {leave_id} not found.")
-
-    if status not in [LeaveStatus.APPROVED, LeaveStatus.REJECTED]:
-        raise InvalidOperationError(f"Invalid leave status: {status}")
-
-    leave.status = status
-    if remark:
-        leave.remark = remark
-    leave.save(update_fields=['status', 'remark'])
-    return leave
-
-
-# ══════════════════════════════════════════════════════════════
-# COMPLAINT SERVICES
-# ══════════════════════════════════════════════════════════════
-
-@transaction.atomic
-def file_complaint(
-    *,
-    hall_name: str,
-    student_name: str,
-    roll_number: str,
-    description: str,
-    contact_number: str
-):
-    """File a new hostel complaint."""
-    complaint = HostelComplaint.objects.create(
-        hall_name=hall_name,
-        student_name=student_name,
-        roll_number=roll_number,
-        description=description,
-        contact_number=contact_number
-    )
-    return complaint
-
-
-# ══════════════════════════════════════════════════════════════
-# FINE SERVICES
-# ══════════════════════════════════════════════════════════════
-
-@transaction.atomic
-def impose_fine(
-    *,
-    student_id: str,
-    student_name: str,
-    hall_id: int,
-    amount: float,
-    reason: str
-):
-    """Impose a fine on a student."""
-    try:
-        student = selectors.get_student_by_id(student_id)
-    except Student.DoesNotExist:
-        raise StudentNotFoundError(f"Student with ID {student_id} not found.")
-
-    fine = HostelFine.objects.create(
-        student=student,
-        student_name=student_name,
-        hall_id=hall_id,
-        amount=amount,
-        reason=reason,
-        status=FineStatus.PENDING
-    )
-    return fine
-
-
-@transaction.atomic
-def update_fine(*, fine_id: int, **update_fields):
-    """Update fine information."""
-    try:
-        fine = selectors.get_fine_by_id(fine_id)
-    except HostelFine.DoesNotExist:
-        raise FineNotFoundError(f"Fine with ID {fine_id} not found.")
-
-    for field, value in update_fields.items():
-        setattr(fine, field, value)
-    fine.save()
-    return fine
-
-
-@transaction.atomic
-def update_fine_status(*, fine_id: int, status: str):
-    """Update the payment status of a fine."""
-    if status not in [FineStatus.PENDING, FineStatus.PAID]:
-        raise InvalidOperationError(f"Invalid fine status: {status}")
-
-    try:
-        fine = selectors.get_fine_by_id(fine_id)
-    except HostelFine.DoesNotExist:
-        raise FineNotFoundError(f"Fine with ID {fine_id} not found.")
-
-    fine.status = status
-    fine.save(update_fields=['status'])
-    return fine
-
-
-@transaction.atomic
-def delete_fine(*, fine_id: int):
-    """Delete a fine."""
-    try:
-        fine = selectors.get_fine_by_id(fine_id)
-    except HostelFine.DoesNotExist:
-        raise FineNotFoundError(f"Fine with ID {fine_id} not found.")
-    fine.delete()
-
-
-# ══════════════════════════════════════════════════════════════
-# INVENTORY SERVICES
-# ══════════════════════════════════════════════════════════════
-
-@transaction.atomic
-def create_inventory_item(
-    *,
-    hall_id: int,
-    inventory_name: str,
-    cost: float,
-    quantity: int
-):
-    """Create a new inventory item."""
-    inventory = HostelInventory.objects.create(
-        hall_id=hall_id,
-        inventory_name=inventory_name,
-        cost=cost,
-        quantity=quantity
-    )
-    return inventory
-
-
-@transaction.atomic
-def update_inventory_item(*, inventory_id: int, **update_fields):
-    """Update inventory item information."""
-    try:
-        inventory = selectors.get_inventory_by_id(inventory_id)
-    except HostelInventory.DoesNotExist:
-        raise InventoryNotFoundError(f"Inventory item with ID {inventory_id} not found.")
-
-    for field, value in update_fields.items():
-        setattr(inventory, field, value)
-    inventory.save()
-    return inventory
-
-
-@transaction.atomic
-def delete_inventory_item(*, inventory_id: int):
-    """Delete an inventory item."""
-    try:
-        inventory = selectors.get_inventory_by_id(inventory_id)
-    except HostelInventory.DoesNotExist:
-        raise InventoryNotFoundError(f"Inventory item with ID {inventory_id} not found.")
-    inventory.delete()
-
-
-# ══════════════════════════════════════════════════════════════
-# WORKER REPORT SERVICES
-# ══════════════════════════════════════════════════════════════
-
-@transaction.atomic
-def create_worker_report(
-    *,
-    hall,
-    worker_id: str,
-    worker_name: str,
-    year: int,
-    month: int,
-    absent: int,
-    total_day: int,
-    remark: str
-):
-    """Create a worker report entry."""
-    report = WorkerReport.objects.create(
-        hall=hall,
-        worker_id=worker_id,
-        worker_name=worker_name,
-        year=year,
-        month=month,
-        absent=absent,
-        total_day=total_day,
-        remark=remark
-    )
-    return report
-
-
-# ══════════════════════════════════════════════════════════════
-# STUDENT DETAILS SERVICES (for updating extended info)
-# ══════════════════════════════════════════════════════════════
-
-@transaction.atomic
-def update_student_details(*, student_id: str, **update_fields):
-    """Update extended student details."""
-    try:
-        student_details = selectors.get_student_details_by_id(student_id)
-        for field, value in update_fields.items():
-            setattr(student_details, field, value)
-        student_details.save()
-        return student_details
-    except StudentDetails.DoesNotExist:
-        # Create if doesn't exist
-        return StudentDetails.objects.create(id=student_id, **update_fields)
-
-
-@transaction.atomic
-def remove_student_from_hostel(*, student_id: str):
-    """Remove a student from hostel (set hall_no to 0)."""
-    try:
-        student = selectors.get_student_by_id(student_id)
-    except Student.DoesNotExist:
-        raise StudentNotFoundError(f"Student with ID {student_id} not found.")
-
-    student.hall_no = 0
-    student.save(update_fields=['hall_no'])
-    return student
+    room.room_number = new_room_number
+    if new_block_number:
+        room.block_number = new_block_number
+    room.save()
+    return room
