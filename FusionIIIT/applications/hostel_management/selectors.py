@@ -21,7 +21,8 @@ from .models import (
     HostelFine, StaffSchedule, HostelInventory,
     HostelNoticeBoard, GuestRoom, GuestRoomBooking,
     HostelTransactionHistory, HostelStudentAttendance, WorkerReport,
-    LeaveStatusChoices, ComplaintStatusChoices, RoomAllocationStatusChoices
+    LeaveStatusChoices, ComplaintStatusChoices, ComplaintPriorityChoices,
+    RoomAllocationStatusChoices, FineStatusChoices, BookingStatusChoices
 )
 from applications.academic_information.models import Student
 from applications.globals.models import Staff, Faculty
@@ -112,6 +113,16 @@ def list_hall_wardens(hall_id):
 def get_student(user_id):
     """Get a student by their user ID."""
     return Student.objects.filter(id__user_id=user_id).first()
+
+
+def get_staff(user_id):
+    """Get a staff instance by user ID."""
+    return Staff.objects.filter(id__user_id=user_id).first()
+
+
+def get_faculty(user_id):
+    """Get a faculty instance by user ID."""
+    return Faculty.objects.filter(id__user_id=user_id).first()
 
 
 def list_students_by_academic_batch(batch_id):
@@ -211,9 +222,9 @@ def list_student_complaints(student_id):
 
 
 def list_open_complaints():
-    """Get all open complaints."""
+    """Get all open/submitted complaints."""
     return HostelComplaint.objects.filter(
-        status=ComplaintStatusChoices.OPEN
+        status=ComplaintStatusChoices.SUBMITTED
     ).order_by('-created_at')
 
 
@@ -256,7 +267,7 @@ def list_escalated_complaints_for_warden(faculty_id):
     """Get escalated complaints assigned to a warden."""
     return HostelComplaint.objects.filter(
         escalated_to_warden=True,
-        warden_assigned_id=faculty_id
+        escalated_to_id=faculty_id
     ).exclude(status=ComplaintStatusChoices.CLOSED).order_by('-created_at')
 
 
@@ -264,7 +275,7 @@ def count_open_complaints_for_student(student_id):
     """Count open complaints for a student."""
     return HostelComplaint.objects.filter(
         student_id=student_id,
-        status__in=[ComplaintStatusChoices.OPEN, ComplaintStatusChoices.IN_PROGRESS]
+        status__in=[ComplaintStatusChoices.SUBMITTED, ComplaintStatusChoices.UNDER_REVIEW]
     ).count()
 
 
@@ -277,9 +288,8 @@ def list_complaints_by_priority(priority):
 
 def list_high_priority_open_complaints():
     """Get high priority and critical open complaints."""
-    from .models import ComplaintPriorityChoices
     return HostelComplaint.objects.filter(
-        status=ComplaintStatusChoices.OPEN,
+        status=ComplaintStatusChoices.SUBMITTED,
         priority__in=[ComplaintPriorityChoices.HIGH, ComplaintPriorityChoices.CRITICAL]
     ).order_by('-created_at')
 
@@ -288,10 +298,10 @@ def list_high_priority_open_complaints():
 # HM-WF-103 & HM-WF-104: ROOM ALLOCATION QUERIES
 # ══════════════════════════════════════════════════════════════
 
-def get_student_current_allocation(student_id):
+def get_student_current_allocation(student):
     """Get student's current active room allocation."""
     return RoomAllocation.objects.filter(
-        student_id=student_id,
+        student=student,
         status=RoomAllocationStatusChoices.ALLOCATED
     ).first()
 
@@ -301,11 +311,9 @@ def get_allocation_by_id(allocation_id):
     return RoomAllocation.objects.filter(id=allocation_id).first()
 
 
-def list_student_allocations(student_id):
+def list_student_allocations(student):
     """Get all room allocations for a student."""
-    return RoomAllocation.objects.filter(
-        student_id=student_id
-    ).order_by('-allocation_date')
+    return RoomAllocation.objects.filter(student=student).order_by('-allocation_date')
 
 
 def list_allocations_in_room(room_id):
@@ -616,18 +624,39 @@ def get_notice(notice_id):
 
 
 def list_active_notices(hall_id):
-    """Get all active notices for a hall."""
+    """
+    Get all active notices for a hall.
+    Enforces BR-HM-035: Notice Display Rules (Urgent priority simulation)
+    """
+    from django.db.models import Case, When, Value, IntegerField
+    
     return HostelNoticeBoard.objects.filter(
         hall__hall_id=hall_id,
         is_active=True
-    ).order_by('-posted_date')
+    ).annotate(
+        priority=Case(
+            When(title__icontains='urgent', then=Value(1)),
+            When(title__icontains='important', then=Value(2)),
+            default=Value(3),
+            output_field=IntegerField(),
+        )
+    ).order_by('priority', '-posted_date')
 
 
 def list_all_notices(hall_id):
     """Get all notices (active and archived) for a hall."""
+    from django.db.models import Case, When, Value, IntegerField
+    
     return HostelNoticeBoard.objects.filter(
         hall__hall_id=hall_id
-    ).order_by('-posted_date')
+    ).annotate(
+        priority=Case(
+            When(title__icontains='urgent', then=Value(1)),
+            When(title__icontains='important', then=Value(2)),
+            default=Value(3),
+            output_field=IntegerField(),
+        )
+    ).order_by('priority', '-posted_date')
 
 
 def list_notices_by_poster(user_id):
@@ -785,7 +814,7 @@ def get_worker_report(report_id):
 def list_staff_reports(staff_id):
     """Get all reports for a staff member."""
     return WorkerReport.objects.filter(
-        staff_id=staff_id
+        worker_id=staff_id
     ).order_by('-year', '-month')
 
 
@@ -799,7 +828,122 @@ def list_hall_reports(hall_id):
 def get_monthly_report(staff_id, year, month):
     """Get report for a specific staff member for a specific month."""
     return WorkerReport.objects.filter(
-        staff_id=staff_id,
+        worker_id=staff_id,
         year=year,
         month=month
     ).first()
+
+
+# ══════════════════════════════════════════════════════════════
+# MISSING SELECTORS REQUIRED BY VIEWS
+# ══════════════════════════════════════════════════════════════
+
+def get_all_leaves():
+    """Get all leaves with optimized queries (for staff views)."""
+    return HostelLeave.objects.select_related(
+        'student__id__user',
+        'processed_by__id__user'
+    ).all().order_by('-created_at')
+
+
+def get_student_leaves(user):
+    """Get all leaves for a student user."""
+    student = get_student(user.id)
+    if not student:
+        return HostelLeave.objects.none()
+    return HostelLeave.objects.filter(
+        student_id=student.pk
+    ).select_related(
+        'student__id__user',
+        'processed_by__id__user'
+    ).order_by('-created_at')
+
+
+def get_all_complaints():
+    """Get all complaints with optimized queries (for staff views)."""
+    return HostelComplaint.objects.select_related(
+        'student__id__user',
+        'assigned_to__id__user',
+        'escalated_to__id__user'
+    ).all().order_by('-created_at')
+
+
+def get_student_complaints(user):
+    """Get all complaints for a student user."""
+    student = get_student(user.id)
+    if not student:
+        return HostelComplaint.objects.none()
+    return HostelComplaint.objects.filter(
+        student_id=student.pk
+    ).select_related(
+        'student__id__user',
+        'assigned_to__id__user'
+    ).order_by('-created_at')
+
+
+def get_all_fines():
+    """Get all fines with optimized queries (for staff views)."""
+    return HostelFine.objects.select_related(
+        'student__id__user',
+        'issued_by__id__user',
+        'waived_by__id__user'
+    ).all().order_by('-issued_date')
+
+
+def get_student_fines(user):
+    """Get all fines for a student user."""
+    student = get_student(user.id)
+    if not student:
+        return HostelFine.objects.none()
+    return HostelFine.objects.filter(
+        student_id=student.pk
+    ).select_related(
+        'student__id__user',
+        'issued_by__id__user',
+        'waived_by__id__user'
+    ).order_by('-issued_date')
+
+
+def get_all_schedules():
+    """Get all staff schedules with optimized queries."""
+    return StaffSchedule.objects.select_related(
+        'hall',
+        'staff__id__user'
+    ).all().order_by('day_of_week', 'start_time')
+
+
+def get_all_inventory():
+    """Get all inventory items with optimized queries."""
+    return HostelInventory.objects.select_related(
+        'hall'
+    ).all().order_by('hall', 'item_name')
+
+# ══════════════════════════════════════════════════════════════
+# NEW FEATURE QUERIES (Room Vacation & Extended Stay)
+# ══════════════════════════════════════════════════════════════
+
+from .models import RoomVacationRequest, ExtendedStayApplication
+
+def list_room_vacations(filters=None):
+    queryset = RoomVacationRequest.objects.select_related('student', 'student__id__user', 'room', 'hall')
+    if filters:
+        if 'student' in filters:
+            queryset = queryset.filter(student=filters['student'])
+        if 'hall_id' in filters:
+            queryset = queryset.filter(hall_id=filters['hall_id'])
+    return queryset.order_by('-created_at')
+
+def get_room_vacation(pk):
+    return RoomVacationRequest.objects.filter(pk=pk).first()
+
+def list_extended_stays(filters=None):
+    queryset = ExtendedStayApplication.objects.select_related('student', 'student__id__user', 'room', 'hall')
+    if filters:
+        if 'student' in filters:
+            queryset = queryset.filter(student=filters['student'])
+        if 'hall_id' in filters:
+            queryset = queryset.filter(hall_id=filters['hall_id'])
+    return queryset.order_by('-created_at')
+
+def get_extended_stay(pk):
+    return ExtendedStayApplication.objects.filter(pk=pk).first()

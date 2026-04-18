@@ -23,6 +23,8 @@ Supports Workflows:
 - HM-WF-113: Extended Stay
 """
 
+from datetime import datetime
+from django.utils import timezone
 from rest_framework import generics, status
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated, IsAdminUser, BasePermission
@@ -37,23 +39,26 @@ from ..models import (
     Hall, HallRoom, HostelLeave, HostelComplaint, RoomAllocation, RoomAllocationChange,
     HostelFine, StaffSchedule, HostelInventory, GuestRoomBooking,
     HostelNoticeBoard,
-    HallWarden, HallCaretaker
+    HallWarden, HallCaretaker, HostelStudentAttendance
 )
 from .serializers import (
     HallSerializer, HallListSerializer, HallCreateUpdateSerializer, HallRoomSerializer, HallRoomCreateUpdateSerializer,
-    HostelLeaveSerializer, HostelLeaveApprovalSerializer,
+    HostelLeaveSerializer, HostelLeaveCreateSerializer, HostelLeaveApprovalSerializer,
     HostelComplaintSerializer, HostelComplaintUpdateSerializer,
     RoomAllocationSerializer, RoomAllocationChangeSerializer,
     RoomAllocationChangeApprovalSerializer,
     HostelFineSerializer, HostelFinePaymentSerializer, HostelFineWaiverSerializer,
     StaffScheduleSerializer, HostelInventorySerializer,
     GuestRoomBookingSerializer, GuestRoomBookingCreateSerializer, GuestRoomBookingApprovalSerializer,
-    HostelNoticeBoardSerializer,
+    HostelNoticeBoardSerializer, HostelAttendanceSerializer
 )
 from .. import selectors, services
-from ..exceptions import (
-    LeaveEligibilityError, LeaveDateValidationError, ComplaintError,
-    RoomAllocationError, RoomChangeError, FineError
+from ..services import (
+    HostelManagementException, LeaveEligibilityError, LeaveDateError,
+    ComplaintEligibilityError, ComplaintRoutingError, ResolutionRemarksError,
+    EscalationAuthorizationError, WardenAuthorityError,
+    RoomChangeEligibilityError, DualApprovalError, AllotmentCapacityError,
+    FineValidationError
 )
 
 
@@ -106,7 +111,7 @@ class IsStudent(BasePermission):
         if not (request.user and request.user.is_authenticated):
             return False
         from applications.academic_information.models import Student
-        return Student.objects.filter(user=request.user).exists()
+        return Student.objects.filter(id__user=request.user).exists()
 
 
 # ══════════════════════════════════════════════════════════════
@@ -557,19 +562,48 @@ class LeaveListCreateView(generics.ListCreateAPIView):
             return selectors.get_all_leaves()
         return selectors.get_student_leaves(user)
 
+    def get_serializer_class(self):
+        """Use writable serializer for POST, read-only for GET."""
+        if self.request.method == 'POST':
+            return HostelLeaveCreateSerializer
+        return HostelLeaveSerializer
+
+    def post(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        if not serializer.is_valid():
+            print(f"DEBUG: LeaveRequest validation failed: {serializer.errors}")
+        return super().post(request, *args, **kwargs)
+
     def perform_create(self, serializer):
         """Submit leave request via service."""
         try:
-            services.submit_leave_request(
-                student=self.request.user,
+            # Get Student instance from User
+            student = selectors.get_student(self.request.user.id)
+            if not student:
+                print(f"DEBUG: User {self.request.user.username} (ID: {self.request.user.id}) is NOT a student.")
+                raise HostelManagementException("Only students can submit leave requests. Please login as a student to test this feature.")
+
+            services.create_leave_request(
+                student=student,
                 start_date=serializer.validated_data['start_date'],
                 end_date=serializer.validated_data['end_date'],
                 reason=serializer.validated_data['reason'],
                 destination=serializer.validated_data.get('destination'),
                 contact_phone=serializer.validated_data.get('contact_phone')
             )
-        except (LeaveEligibilityError, LeaveDateValidationError) as e:
-            return Response({'detail': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        except (LeaveEligibilityError, LeaveDateError, HostelManagementException) as e:
+            print(f"DEBUG: LeaveRequest creation failed: {str(e)}")
+            from rest_framework.exceptions import ValidationError
+            raise ValidationError({"detail": str(e)})
+
+
+class LeaveMyListView(generics.ListAPIView):
+    """List only the authenticated user's leave requests."""
+    permission_classes = [IsAuthenticated]
+    serializer_class = HostelLeaveSerializer
+
+    def get_queryset(self):
+        return selectors.get_student_leaves(self.request.user)
 
 
 class LeaveRetrieveUpdateView(generics.RetrieveUpdateAPIView):
@@ -594,9 +628,14 @@ class LeaveApproveView(generics.UpdateAPIView):
     def perform_update(self, serializer):
         """Approve leave via service."""
         leave = self.get_object()
+        staff = selectors.get_staff(self.request.user.id)
+        if not staff:
+             from rest_framework.exceptions import PermissionDenied
+             raise PermissionDenied("Only staff can approve leaves.")
+             
         services.approve_leave(
             leave_id=leave.id,
-            approved_by=self.request.user,
+            processed_by=staff,
             remarks=serializer.validated_data.get('remarks')
         )
 
@@ -613,8 +652,14 @@ class LeaveRejectView(generics.UpdateAPIView):
     def perform_update(self, serializer):
         """Reject leave via service."""
         leave = self.get_object()
+        staff = selectors.get_staff(self.request.user.id)
+        if not staff:
+             from rest_framework.exceptions import PermissionDenied
+             raise PermissionDenied("Only staff can reject leaves.")
+
         services.reject_leave(
             leave_id=leave.id,
+            processed_by=staff,
             rejection_reason=serializer.validated_data.get('rejection_reason', '')
         )
 
@@ -638,16 +683,30 @@ class ComplaintListCreateView(generics.ListCreateAPIView):
     def perform_create(self, serializer):
         """Submit complaint via service."""
         try:
-            services.submit_complaint(
-                student=self.request.user,
+            student = selectors.get_student(self.request.user.id)
+            if not student:
+                 raise HostelManagementException("Only students can submit complaints.")
+
+            services.create_complaint(
+                student=student,
                 category=serializer.validated_data['category'],
                 title=serializer.validated_data['title'],
                 description=serializer.validated_data['description'],
                 priority=serializer.validated_data.get('priority'),
                 location=serializer.validated_data.get('location')
             )
-        except ComplaintError as e:
-            return Response({'detail': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        except (ComplaintEligibilityError, ComplaintRoutingError, HostelManagementException) as e:
+            from rest_framework.exceptions import ValidationError
+            raise ValidationError({'detail': str(e)})
+
+
+class ComplaintMyListView(generics.ListAPIView):
+    """List only the authenticated user's complaints."""
+    permission_classes = [IsAuthenticated]
+    serializer_class = HostelComplaintSerializer
+
+    def get_queryset(self):
+        return selectors.get_student_complaints(self.request.user)
 
 
 class ComplaintRetrieveUpdateView(generics.RetrieveUpdateAPIView):
@@ -665,7 +724,7 @@ class ComplaintRetrieveUpdateView(generics.RetrieveUpdateAPIView):
         services.update_complaint(
             complaint_id=complaint.id,
             status=serializer.validated_data.get('status'),
-            resolution_notes=serializer.validated_data.get('resolution_notes')
+            resolution_notes=serializer.validated_data.get('resolution_remarks')
         )
 
 
@@ -681,12 +740,17 @@ class ComplaintEscalateView(generics.UpdateAPIView):
     def perform_update(self, serializer):
         """Escalate complaint via service."""
         complaint = self.get_object()
+        faculty = selectors.get_faculty(self.request.user.id)
+        if not faculty:
+             from rest_framework.exceptions import PermissionDenied
+             raise PermissionDenied("Only faculty (Wardens) can handle escalation.")
+
         try:
             services.escalate_complaint(
                 complaint_id=complaint.id,
-                escalated_by=self.request.user
+                warden=faculty
             )
-        except ComplaintError as e:
+        except (EscalationAuthorizationError, WardenAuthorityError, HostelManagementException) as e:
             return Response({'detail': str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
 
@@ -925,11 +989,11 @@ class RoomChangeListCreateView(generics.ListCreateAPIView):
         try:
             services.request_room_change(
                 student=self.request.user,
-                current_room_id=serializer.validated_data['current_room'].id,
-                requested_room_id=serializer.validated_data['requested_room'].id,
+                current_room=serializer.validated_data['current_room'],
+                requested_room=serializer.validated_data['requested_room'],
                 reason=serializer.validated_data['reason']
             )
-        except RoomChangeError as e:
+        except (RoomChangeEligibilityError, HostelManagementException) as e:
             return Response({'detail': str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
 
@@ -961,7 +1025,7 @@ class RoomChangeApproveView(generics.UpdateAPIView):
                 approved_by=self.request.user,
                 remarks=serializer.validated_data.get('remarks')
             )
-        except RoomChangeError as e:
+        except (RoomChangeEligibilityError, DualApprovalError, AllotmentCapacityError, HostelManagementException) as e:
             return Response({'detail': str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
 
@@ -1010,7 +1074,7 @@ class FineListCreateView(generics.ListCreateAPIView):
                 due_date=serializer.validated_data['due_date'],
                 issued_by=self.request.user
             )
-        except FineError as e:
+        except (FineValidationError, HostelManagementException) as e:
             return Response({'detail': str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
 
@@ -1152,11 +1216,13 @@ class GuestBookingListCreateView(generics.ListCreateAPIView):
     serializer_class = GuestRoomBookingSerializer
 
     def get_serializer_class(self):
+        
         """Use appropriate serializer based on request method."""
         if self.request.method == 'POST':
             return GuestRoomBookingCreateSerializer
         return GuestRoomBookingSerializer
 
+    
     def get_queryset(self):
         """Get bookings for user or all if staff."""
         user = self.request.user
@@ -1171,10 +1237,13 @@ class GuestBookingListCreateView(generics.ListCreateAPIView):
             guest_phone=serializer.validated_data['guest_phone'],
             arrival_date=serializer.validated_data['arrival_date'],
             departure_date=serializer.validated_data['departure_date'],
-            arrival_time=serializer.validated_data['arrival_time'],
-            departure_time=serializer.validated_data['departure_time'],
             purpose=serializer.validated_data['purpose'],
-            total_guests=serializer.validated_data['total_guests']
+            total_guests=serializer.validated_data['total_guests'],
+            guest_email=serializer.validated_data.get('guest_email', ''),
+            guest_address=serializer.validated_data.get('guest_address', ''),
+            nationality=serializer.validated_data.get('nationality', ''),
+            rooms_required=serializer.validated_data.get('rooms_required', 1),
+            room_type=serializer.validated_data.get('room_type', 'single')
         )
 
 
@@ -1296,3 +1365,178 @@ class NoticeRetrieveView(generics.RetrieveAPIView):
     def get_object(self):
         """Get notice by ID."""
         return get_object_or_404(HostelNoticeBoard, pk=self.kwargs['pk'])
+
+
+# ══════════════════════════════════════════════════════════════
+# NEW FEATURE VIEWS (Room Vacation & Extended Stay)
+# ══════════════════════════════════════════════════════════════
+
+from .serializers import RoomVacationRequestSerializer, ExtendedStayApplicationSerializer
+from ..selectors import list_room_vacations, get_room_vacation, list_extended_stays, get_extended_stay
+
+class RoomVacationListCreateView(generics.ListCreateAPIView):
+    serializer_class = RoomVacationRequestSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        filters = {}
+        if not self.request.user.is_staff and not self.request.user.is_superuser:
+            filters['student'] = getattr(self.request.user, 'student', None)
+        return list_room_vacations(filters)
+
+    def perform_create(self, serializer):
+        serializer.save(student=self.request.user.student)
+
+class RoomVacationDetailView(generics.RetrieveUpdateAPIView):
+    serializer_class = RoomVacationRequestSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        filters = {}
+        if not self.request.user.is_staff and not self.request.user.is_superuser:
+            filters['student'] = getattr(self.request.user, 'student', None)
+        return list_room_vacations(filters)
+
+class RoomVacationVerifyView(generics.UpdateAPIView):
+    serializer_class = RoomVacationRequestSerializer
+    permission_classes = [IsAdminUser]
+
+    def update(self, request, *args, **kwargs):
+        from ..services import process_room_vacation
+        try:
+            remarks = request.data.get('remarks', '')
+            obj = process_room_vacation(kwargs['pk'], 'verify', remarks)
+            return Response({'status': obj.status})
+        except Exception as e:
+            return Response({'error': str(e)}, status=400)
+
+class RoomVacationApproveView(generics.UpdateAPIView):
+    serializer_class = RoomVacationRequestSerializer
+    permission_classes = [IsAdminUser]
+
+    def update(self, request, *args, **kwargs):
+        from ..services import process_room_vacation
+        try:
+            remarks = request.data.get('remarks', '')
+            obj = process_room_vacation(kwargs['pk'], 'approve', remarks)
+            return Response({'status': obj.status})
+        except Exception as e:
+            return Response({'error': str(e)}, status=400)
+
+
+class ExtendedStayListCreateView(generics.ListCreateAPIView):
+    serializer_class = ExtendedStayApplicationSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        filters = {}
+        if not self.request.user.is_staff and not self.request.user.is_superuser:
+            filters['student'] = getattr(self.request.user, 'student', None)
+        return list_extended_stays(filters)
+
+    def create(self, request, *args, **kwargs):
+        from ..services import create_extended_stay
+        try:
+            serializer = self.get_serializer(data=request.data)
+            serializer.is_valid(raise_exception=True)
+            
+            student = getattr(self.request.user, 'student', None)
+            if not student:
+                return Response({"error": "User is not a student."}, status=400)
+                
+            stay = create_extended_stay(
+                student=student,
+                start_date=serializer.validated_data['start_date'],
+                end_date=serializer.validated_data['end_date'],
+                reason=serializer.validated_data['reason']
+            )
+            return Response(ExtendedStayApplicationSerializer(stay).data, status=201)
+        except Exception as e:
+            return Response({'error': str(e)}, status=400)
+
+class ExtendedStayDetailView(generics.RetrieveUpdateAPIView):
+    serializer_class = ExtendedStayApplicationSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        filters = {}
+        if not self.request.user.is_staff and not self.request.user.is_superuser:
+            filters['student'] = getattr(self.request.user, 'student', None)
+        return list_extended_stays(filters)
+
+class ExtendedStayApproveView(generics.UpdateAPIView):
+    serializer_class = ExtendedStayApplicationSerializer
+    permission_classes = [IsAdminUser]
+    
+    def update(self, request, *args, **kwargs):
+        try:
+            obj = get_extended_stay(kwargs['pk'])
+            obj.status = 'approved'
+            obj.remarks = request.data.get('remarks', obj.remarks)
+            obj.save()
+            return Response({'status': 'approved'})
+        except Exception as e:
+            return Response({'error': str(e)}, status=400)
+
+class ExtendedStayRejectView(generics.UpdateAPIView):
+    serializer_class = ExtendedStayApplicationSerializer
+    permission_classes = [IsAdminUser]
+    
+    def update(self, request, *args, **kwargs):
+        try:
+            obj = get_extended_stay(kwargs['pk'])
+            obj.status = 'rejected'
+            obj.remarks = request.data.get('remarks', obj.remarks)
+            obj.save()
+            return Response({'status': 'rejected'})
+        except Exception as e:
+            return Response({'error': str(e)}, status=400)
+
+
+# ══════════════════════════════════════════════════════════════
+# ATTENDANCE MANAGEMENT VIEWS
+# ══════════════════════════════════════════════════════════════
+
+class AttendanceByHallView(generics.ListAPIView):
+    """List attendance for a hall on a specific date."""
+    permission_classes = [IsAuthenticated]
+    serializer_class = HostelAttendanceSerializer
+
+    def get_queryset(self):
+        hall_id = self.kwargs['hall_id']
+        date_str = self.request.query_params.get('date')
+        if date_str:
+            try:
+                date = datetime.strptime(date_str, '%Y-%m-%d').date()
+            except ValueError:
+                date = timezone.now().date()
+        else:
+            date = timezone.now().date()
+        return selectors.list_attendance_by_date(hall_id, date)
+
+
+class AttendanceMarkView(generics.CreateAPIView):
+    """Bulk mark attendance for a hall."""
+    permission_classes = [IsAuthenticated]
+    serializer_class = HostelAttendanceSerializer
+
+    def post(self, request, *args, **kwargs):
+        hall_id = request.data.get('hall_id')
+        date_str = request.data.get('date')
+        attendance_data = request.data.get('attendance', [])
+        
+        if not hall_id or not date_str:
+            return Response({'error': 'hall_id and date are required'}, status=status.HTTP_400_BAD_REQUEST)
+            
+        try:
+            hall = selectors.get_hall_by_id(hall_id)
+            if not hall:
+                return Response({'error': f'Hall {hall_id} not found'}, status=status.HTTP_404_NOT_FOUND)
+            
+            date = datetime.strptime(date_str, '%Y-%m-%d').date()
+            records = services.mark_attendance(hall, date, attendance_data)
+            serializer = self.get_serializer(records, many=True)
+            return Response(serializer.data, status=status.HTTP_201_CREATED)
+        except Exception as e:
+            return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+

@@ -55,6 +55,7 @@ admin_patterns = [
 # ══════════════════════════════════════════════════════════════
 leave_patterns = [
     path('', views.LeaveListCreateView.as_view(), name='leave-list-create'),
+    path('my/', views.LeaveMyListView.as_view(), name='leave-my-list'),
     path('<int:pk>/', views.LeaveRetrieveUpdateView.as_view(), name='leave-detail'),
     path('<int:pk>/approve/', views.LeaveApproveView.as_view(), name='leave-approve'),
     path('<int:pk>/reject/', views.LeaveRejectView.as_view(), name='leave-reject'),
@@ -65,6 +66,7 @@ leave_patterns = [
 # ══════════════════════════════════════════════════════════════
 complaint_patterns = [
     path('', views.ComplaintListCreateView.as_view(), name='complaint-list-create'),
+    path('my/', views.ComplaintMyListView.as_view(), name='complaint-my-list'),
     path('<int:pk>/', views.ComplaintRetrieveUpdateView.as_view(), name='complaint-detail'),
     path('<int:pk>/escalate/', views.ComplaintEscalateView.as_view(), name='complaint-escalate'),
     path('<int:pk>/resolve/', views.ComplaintResolveView.as_view(), name='complaint-resolve'),
@@ -137,6 +139,14 @@ guest_booking_patterns = [
 ]
 
 # ══════════════════════════════════════════════════════════════
+# ATTENDANCE MANAGEMENT ROUTES
+# ══════════════════════════════════════════════════════════════
+attendance_patterns = [
+    path('hall/<str:hall_id>/', views.AttendanceByHallView.as_view(), name='attendance-by-hall'),
+    path('mark/', views.AttendanceMarkView.as_view(), name='attendance-mark'),
+]
+
+# ══════════════════════════════════════════════════════════════
 # MAIN URL PATTERNS - Namespace organization
 # ══════════════════════════════════════════════════════════════
 urlpatterns = [
@@ -151,4 +161,27 @@ urlpatterns = [
     path('inventory/', include((inventory_patterns, 'inventory'))),
     path('notices/', include((notice_patterns, 'notices'))),
     path('guest-bookings/', include((guest_booking_patterns, 'guest-bookings'))),
+    path('attendance/', include((attendance_patterns, 'attendance'))),
 ]
+
+# ══════════════════════════════════════════════════════════════
+# NEW FEATURE ROUTES (Room Vacation & Extended Stay)
+# ══════════════════════════════════════════════════════════════
+vacation_patterns = [
+    path('', views.RoomVacationListCreateView.as_view(), name='vacation-list-create'),
+    path('<int:pk>/', views.RoomVacationDetailView.as_view(), name='vacation-detail'),
+    path('<int:pk>/verify/', views.RoomVacationVerifyView.as_view(), name='vacation-verify'),
+    path('<int:pk>/approve/', views.RoomVacationApproveView.as_view(), name='vacation-approve'),
+]
+
+extended_stay_patterns = [
+    path('', views.ExtendedStayListCreateView.as_view(), name='extendedstay-list-create'),
+    path('<int:pk>/', views.ExtendedStayDetailView.as_view(), name='extendedstay-detail'),
+    path('<int:pk>/approve/', views.ExtendedStayApproveView.as_view(), name='extendedstay-approve'),
+    path('<int:pk>/reject/', views.ExtendedStayRejectView.as_view(), name='extendedstay-reject'),
+]
+
+urlpatterns.extend([
+    path('vacations/', include((vacation_patterns, 'vacations'))),
+    path('extended-stays/', include((extended_stay_patterns, 'extended-stays'))),
+])

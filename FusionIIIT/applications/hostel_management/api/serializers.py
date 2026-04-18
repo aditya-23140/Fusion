@@ -40,6 +40,7 @@ from ..models import (
     LeaveStatusChoices,
     ComplaintStatusChoices,
     ComplaintCategoryChoices,
+    ComplaintPriorityChoices,
     FineStatusChoices,
     RoomAllocationStatusChoices,
 )
@@ -58,7 +59,7 @@ class HallSerializer(serializers.ModelSerializer):
         model = Hall
         fields = [
             'id', 'hall_id', 'hall_name', 'max_accomodation',
-            'number_students', 'assigned_batch', 'type_of_seater', 'number_of_rooms'
+            'number_students', 'assigned_batch', 'type_of_seater', 'number_of_rooms', 'status'
         ]
         read_only_fields = fields
     
@@ -241,7 +242,7 @@ class HallRoomCreateUpdateSerializer(serializers.ModelSerializer):
 
 class HostelLeaveSerializer(serializers.ModelSerializer):
     """Read-only serializer for Leave details."""
-    student_name = serializers.CharField(source='student.user.username', read_only=True)
+    student_name = serializers.CharField(source='student.id.user.username', read_only=True)
     processed_by_name = serializers.CharField(source='processed_by.id.user.username', read_only=True, allow_null=True)
     
     class Meta:
@@ -300,17 +301,17 @@ class HostelLeaveApprovalSerializer(serializers.Serializer):
 
 class HostelComplaintSerializer(serializers.ModelSerializer):
     """Read-only serializer for Complaint details."""
-    student_name = serializers.CharField(source='student.user.username', read_only=True)
+    student_name = serializers.CharField(source='student.id.user.username', read_only=True)
     assigned_to_name = serializers.CharField(source='assigned_to.id.user.username', read_only=True, allow_null=True)
-    warden_name = serializers.CharField(source='warden_assigned.id.user.username', read_only=True, allow_null=True)
+    warden_name = serializers.CharField(source='escalated_to.id.user.username', read_only=True, allow_null=True)
     
     class Meta:
         model = HostelComplaint
         fields = [
             'id', 'student', 'student_name', 'hall', 'category', 'priority',
             'title', 'description', 'location', 'status', 'assigned_to',
-            'assigned_to_name', 'resolution_notes', 'escalated_to_warden',
-            'warden_assigned', 'warden_name', 'created_at', 'updated_at', 'resolved_at'
+            'assigned_to_name', 'resolution_remarks', 'escalated_to_warden',
+            'escalated_to', 'warden_name', 'created_at', 'updated_at', 'resolved_at'
         ]
         read_only_fields = fields
 
@@ -348,10 +349,10 @@ class HostelComplaintUpdateSerializer(serializers.ModelSerializer):
     
     class Meta:
         model = HostelComplaint
-        fields = ['status', 'resolution_notes', 'priority']
+        fields = ['status', 'resolution_remarks', 'priority']
     
-    def validate_resolution_notes(self, value):
-        """Validate resolution notes if status is RESOLVED."""
+    def validate_resolution_remarks(self, value):
+        """Validate resolution remarks if status is RESOLVED."""
         if value and len(value.strip()) < 10:
             raise serializers.ValidationError("Resolution notes must be at least 10 characters.")
         return value
@@ -444,7 +445,7 @@ class RoomAllocationChangeApprovalSerializer(serializers.Serializer):
 
 class HostelFineSerializer(serializers.ModelSerializer):
     """Read-only serializer for Fine details."""
-    student_name = serializers.CharField(source='student.user.username', read_only=True)
+    student_name = serializers.CharField(source='student.id.user.username', read_only=True)
     issued_by_name = serializers.CharField(source='issued_by.id.user.username', read_only=True, allow_null=True)
     waived_by_name = serializers.CharField(source='waived_by.id.user.username', read_only=True, allow_null=True)
     
@@ -557,7 +558,7 @@ class GuestRoomSerializer(serializers.ModelSerializer):
 
 class GuestRoomBookingSerializer(serializers.ModelSerializer):
     """Read-only serializer for Guest Room Booking."""
-    student_name = serializers.CharField(source='student.user.username', read_only=True)
+    student_name = serializers.CharField(source='student.id.user.username', read_only=True)
     room_number = serializers.CharField(source='guest_room.room_number', read_only=True, allow_null=True)
     
     class Meta:
@@ -581,7 +582,7 @@ class GuestRoomBookingCreateSerializer(serializers.ModelSerializer):
         fields = [
             'guest_name', 'guest_phone', 'guest_email', 'guest_address',
             'nationality', 'total_guests', 'purpose', 'arrival_date',
-            'arrival_time', 'departure_date', 'departure_time',
+            'departure_date',
             'rooms_required', 'room_type'
         ]
     
@@ -621,7 +622,11 @@ class GuestRoomBookingCreateSerializer(serializers.ModelSerializer):
 # ══════════════════════════════════════════════════════════════
 
 class HostelNoticeBoardSerializer(serializers.ModelSerializer):
-    """Serializer for Notice Board."""
+    """
+    Serializer for Notice Board.
+    Enforces:
+    - BR-HM-029: Notice Content Validation
+    """
     hall_name = serializers.CharField(source='hall.hall_name', read_only=True)
     posted_by_name = serializers.CharField(source='posted_by.username', read_only=True)
     
@@ -633,6 +638,24 @@ class HostelNoticeBoardSerializer(serializers.ModelSerializer):
             'archive_date', 'updated_at'
         ]
         read_only_fields = ['id', 'posted_by', 'posted_date', 'posted_by_name', 'hall_name']
+        
+    def validate_title(self, value):
+        if not value or len(value) < 5 or len(value) > 200:
+            raise serializers.ValidationError("Title must be between 5 and 200 characters.")
+        
+        profanity = ['spam', 'abuse', 'fake']
+        if any(bad_word in value.lower() for bad_word in profanity):
+            raise serializers.ValidationError("Title contains prohibited/profane words.")
+        return value
+        
+    def validate_description(self, value):
+        if not value or len(value.strip()) < 20:
+            raise serializers.ValidationError("Description must be at least 20 characters long.")
+            
+        profanity = ['spam', 'abuse', 'fake']
+        if any(bad_word in value.lower() for bad_word in profanity):
+            raise serializers.ValidationError("Description contains prohibited/profane words.")
+        return value
 
 
 # ══════════════════════════════════════════════════════════════
@@ -654,3 +677,49 @@ class ExtendedStayRequestApprovalSerializer(serializers.Serializer):
     """Serializer for approving/rejecting extended stay requests."""
     remarks = serializers.CharField(required=False, allow_blank=True, max_length=500)
     rejection_reason = serializers.CharField(required=False, allow_blank=True, max_length=500)
+
+from ..models import RoomVacationRequest, ExtendedStayApplication
+
+class RoomVacationRequestSerializer(serializers.ModelSerializer):
+    student_name = serializers.CharField(source='student.id.user.username', read_only=True)
+    room_number = serializers.CharField(source='room.room_no', read_only=True)
+    hall_name = serializers.CharField(source='hall.hall_name', read_only=True)
+
+    class Meta:
+        model = RoomVacationRequest
+        fields = [
+            'id', 'student', 'student_name', 'room', 'room_number', 'hall', 'hall_name',
+            'vacation_date', 'status', 'remarks', 'created_at'
+        ]
+        read_only_fields = ['student', 'status', 'created_at', 'student_name', 'room_number', 'hall_name']
+
+
+class ExtendedStayApplicationSerializer(serializers.ModelSerializer):
+    student_name = serializers.CharField(source='student.id.user.username', read_only=True)
+    room_number = serializers.CharField(source='room.room_no', read_only=True)
+    hall_name = serializers.CharField(source='hall.hall_name', read_only=True)
+
+    class Meta:
+        model = ExtendedStayApplication
+        fields = [
+            'id', 'student', 'student_name', 'room', 'room_number', 'hall', 'hall_name',
+            'start_date', 'end_date', 'reason', 'status', 'remarks', 'created_at'
+        ]
+        read_only_fields = ['student', 'status', 'created_at', 'student_name', 'room_number', 'hall_name']
+
+
+# ══════════════════════════════════════════════════════════════
+# ATTENDANCE SERIALIZERS
+# ══════════════════════════════════════════════════════════════
+
+class HostelAttendanceSerializer(serializers.ModelSerializer):
+    """Serializer for hostel student attendance."""
+    student_name = serializers.CharField(source='student_id.id.user.username', read_only=True)
+    roll_number = serializers.CharField(source='student_id.id.user.username', read_only=True)
+    
+    class Meta:
+        model = HostelStudentAttendance
+        fields = ['id', 'hall', 'student_id', 'student_name', 'roll_number', 'date', 'present', 'remarks']
+        read_only_fields = ['id', 'student_name', 'roll_number']
+
+

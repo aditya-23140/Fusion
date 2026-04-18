@@ -8,7 +8,7 @@ This module contains ALL business logic, state mutations, and rule enforcement.
 """
 
 from django.utils import timezone
-from datetime import datetime, timedelta
+from datetime import timedelta
 from decimal import Decimal
 
 from .models import (
@@ -124,7 +124,7 @@ def create_leave_request(student, start_date, end_date, reason, destination=None
     - BR-HM-103: Mandatory Leave Justification Policy
     """
     # BR-HM-101: Check if student is currently in hostel
-    current_allocation = selectors.get_student_current_allocation(student.id)
+    current_allocation = selectors.get_student_current_allocation(student)
     if not current_allocation or current_allocation.status != RoomAllocationStatusChoices.ALLOCATED:
         raise LeaveEligibilityError(
             "Student must have an active hostel allocation to request leave."
@@ -151,12 +151,15 @@ def create_leave_request(student, start_date, end_date, reason, destination=None
     # Create the leave request
     leave = HostelLeave.objects.create(
         student=student,
+        student_name=student.id.user.get_full_name() or student.id.user.username,
+        roll_num=student.id.user.username,
         start_date=start_date,
         end_date=end_date,
         reason=reason,
         destination=destination,
         contact_phone=contact_phone,
-        status=LeaveStatusChoices.PENDING
+        status=LeaveStatusChoices.PENDING,
+        hall=current_allocation.room.hall
     )
     
     return leave
@@ -248,15 +251,37 @@ def _mark_leave_attendance(student, start_date, end_date, is_present):
     
     while current_date <= end_date:
         HostelStudentAttendance.objects.update_or_create(
-            student=student,
+            student_id=student,
             date=current_date,
             defaults={
                 'hall': hall,
-                'is_present': is_present,
+                'present': is_present,
                 'remarks': 'Leave' if not is_present else None
             }
         )
         current_date += timedelta(days=1)
+
+
+def mark_attendance(hall, date, attendance_data):
+    """
+    Bulk mark attendance for students in a hall.
+    attendance_data: list of dicts [{'student_id': id, 'present': bool, 'remarks': str}]
+    """
+    from applications.academic_information.models import Student
+    records = []
+    for entry in attendance_data:
+        student = Student.objects.get(pk=entry['student_id'])
+        record, created = HostelStudentAttendance.objects.update_or_create(
+            student_id=student,
+            date=date,
+            defaults={
+                'hall': hall,
+                'present': entry['present'],
+                'remarks': entry.get('remarks')
+            }
+        )
+        records.append(record)
+    return records
 
 
 # ══════════════════════════════════════════════════════════════
@@ -531,7 +556,7 @@ def approve_room_change_caretaker(change_id, caretaker, remarks=None):
         )
     
     # Update allocations
-    current_allocation = selectors.get_student_current_allocation(change.student.id)
+    current_allocation = selectors.get_student_current_allocation(change.student)
     if current_allocation:
         # Release from current room
         current_allocation.status = RoomAllocationStatusChoices.VACANT
@@ -628,8 +653,7 @@ def issue_fine(student, hall, fine_type, amount, reason, due_date, issued_by):
         reason=reason,
         due_date=due_date,
         status=FineStatusChoices.PENDING,
-        issued_by=issued_by,
-        issued_date=timezone.now().date()
+        issued_by=issued_by
     )
     
     return fine
@@ -731,7 +755,7 @@ def request_guest_room(student, guest_name, guest_phone, arrival_date, departure
     if not student_obj:
         raise HostelManagementException("Student not found.")
     
-    current_allocation = selectors.get_student_current_allocation(student_obj.pk)
+    current_allocation = selectors.get_student_current_allocation(student_obj)
     if not current_allocation:
         raise HostelManagementException("Student must be allocated to a hostel.")
     
@@ -994,3 +1018,292 @@ def rename_room_in_hall(room, new_room_number, new_block_number=None):
         room.block_number = new_block_number
     room.save()
     return room
+
+
+# ══════════════════════════════════════════════════════════════
+# VIEW-FACING SERVICE WRAPPERS
+# These functions are called by views.py and delegate to the
+# core service functions above.
+# ══════════════════════════════════════════════════════════════
+
+def submit_leave_request(student, start_date, end_date, reason, destination=None, contact_phone=None):
+    """Wrapper for create_leave_request — called by LeaveListCreateView."""
+    return create_leave_request(student, start_date, end_date, reason, destination, contact_phone)
+
+
+def submit_complaint(student, category, title, description, priority=None, location=None):
+    """Wrapper for create_complaint — called by ComplaintListCreateView."""
+    return create_complaint(
+        student=student,
+        title=title,
+        description=description,
+        category=category,
+        priority=priority or 'medium',
+        location=location
+    )
+
+
+def update_complaint(complaint_id, status=None, resolution_notes=None):
+    """Wrapper for update_complaint_status — called by ComplaintRetrieveUpdateView."""
+    if status:
+        return update_complaint_status(complaint_id, status, resolution_notes)
+    return selectors.get_complaint(complaint_id)
+
+
+def resolve_complaint(complaint_id, resolution_notes=''):
+    """Resolve a complaint — called by ComplaintResolveView."""
+    from .models import ComplaintStatusChoices
+    return update_complaint_status(complaint_id, ComplaintStatusChoices.RESOLVED, resolution_notes)
+
+
+def approve_room_change(change_id, approved_by, remarks=None):
+    """Unified room change approval — determines warden vs caretaker step."""
+    from .models import AllocationChangeStatusChoices
+    change = selectors.get_room_change(change_id)
+    if not change:
+        raise HostelManagementException(f"Room change {change_id} not found.")
+    
+    if change.status == AllocationChangeStatusChoices.REQUESTED:
+        # First approval: warden
+        return approve_room_change_warden(change_id, approved_by, remarks)
+    elif change.status == AllocationChangeStatusChoices.APPROVED_WARDEN:
+        # Second approval: caretaker
+        return approve_room_change_caretaker(change_id, approved_by, remarks)
+    else:
+        raise HostelManagementException(
+            f"Room change cannot be approved in {change.status} status."
+        )
+
+
+def impose_fine(student_id, fine_type, amount, reason, due_date, issued_by):
+    """Wrapper for issue_fine — called by FineListCreateView."""
+    student = selectors.get_student(student_id)
+    if not student:
+        raise HostelManagementException("Student not found.")
+    
+    current_allocation = selectors.get_student_current_allocation(student.pk)
+    hall = current_allocation.room.hall if current_allocation and current_allocation.room else None
+    if not hall:
+        raise HostelManagementException("Student must be allocated to a hall for fines.")
+    
+    return issue_fine(student, hall, fine_type, amount, reason, due_date, issued_by)
+
+
+def mark_fine_paid(fine_id, paid_date=None):
+    """Wrapper for pay_fine — called by FineMarkPaidView."""
+    return pay_fine(fine_id)
+
+
+def create_staff_schedule(hall_id, staff_id, day_of_week, start_time, end_time, shift_type=None):
+    """
+    Create a staff schedule — called by StaffScheduleListCreateView.
+    Enforces:
+    - BR-HM-016: Guard Shift Conflict Prevention
+    - BR-HM-027: Security Audit Logging
+    """
+    from .models import StaffSchedule, Hall
+    from django.db.models import Q
+    import logging
+    
+    logger = logging.getLogger(__name__)
+    
+    hall = Hall.objects.filter(id=hall_id).first()
+    if not hall:
+        raise HostelManagementException(f"Hall {hall_id} not found.")
+    
+    from applications.globals.models import Staff
+    staff = Staff.objects.filter(id=staff_id).first()
+    if not staff:
+        raise HostelManagementException(f"Staff {staff_id} not found.")
+        
+    if start_time >= end_time:
+        raise HostelManagementException("Shift end time must be after start time.")
+    
+    # BR-HM-016: Prevent overlapping shifts
+    overlapping = StaffSchedule.objects.filter(
+        staff=staff, 
+        day_of_week=day_of_week
+    ).filter(
+        Q(start_time__lt=end_time) & Q(end_time__gt=start_time)
+    )
+    
+    if overlapping.exists():
+        raise HostelManagementException("Staff already has an overlapping shift on this day.")
+    
+    schedule = StaffSchedule.objects.create(
+        hall=hall,
+        staff=staff,
+        day_of_week=day_of_week,
+        start_time=start_time,
+        end_time=end_time,
+        shift_type=shift_type or 'Caretaker'
+    )
+    
+    # BR-HM-027: Security Audit Logging
+    logger.info(f"SECURITY AUDIT: Shift created for {staff.id.user.username} at {hall.hall_name} "
+                f"on {day_of_week} ({start_time}-{end_time}) by system.")
+                
+    return schedule
+
+
+def add_inventory_item(hall_id, item_name, quantity, unit_cost, remarks=None):
+    """
+    Add an inventory item — called by InventoryListCreateView.
+    Enforces:
+    - BR-HM-030: Resource Request Validation
+    - BR-HM-031: Inventory Audit Trail
+    """
+    from .models import HostelInventory, Hall
+    import logging
+    
+    logger = logging.getLogger(__name__)
+    
+    hall = Hall.objects.filter(id=hall_id).first()
+    if not hall:
+        raise HostelManagementException(f"Hall {hall_id} not found.")
+        
+    # BR-HM-030: Quantity must be positive
+    if quantity <= 0:
+        raise HostelManagementException("Quantity must be a positive integer.")
+    
+    item = HostelInventory.objects.create(
+        hall=hall,
+        item_name=item_name,
+        quantity=quantity,
+        unit_cost=unit_cost,
+        remarks=remarks
+    )
+    
+    # BR-HM-031: Inventory Audit Trail
+    logger.info(f"INVENTORY AUDIT: Added item {item_name} (Qty: {quantity}) to {hall.hall_name}.")
+    
+    return item
+
+
+# ══════════════════════════════════════════════════════════════
+# NEW FEATURES: VACATIONS & EXTENDED STAYS (BR-HM-015 - BR-HM-062)
+# ══════════════════════════════════════════════════════════════
+
+def process_room_vacation(vacation_id, action, remarks=None):
+    """
+    Process Room Vacation Request.
+    Enforces:
+    - BR-HM-015: Room Vacation Prerequisites (no fines)
+    - BR-HM-028: Vacation Finalization
+    - BR-HM-023: Room Availability update on deallocation
+    """
+    from .models import HostelFine, FineStatusChoices, RoomAllocationStatusChoices
+    
+    vacation = selectors.get_room_vacation(vacation_id)
+    if not vacation:
+        raise HostelManagementException("Vacation request not found.")
+        
+    student = vacation.student
+    
+    if action == 'approve':
+        # BR-HM-015: Check outstanding fines
+        outstanding_fines = HostelFine.objects.filter(
+            student=student, 
+            status=FineStatusChoices.PENDING
+        ).exists()
+        if outstanding_fines:
+            raise HostelManagementException("Student cannot vacate: Outstanding fines exist.")
+            
+        vacation.status = 'approved'
+        vacation.remarks = remarks
+        vacation.save()
+        
+        # BR-HM-023 & BR-HM-028: Update room availability and release allocation
+        current_alloc = selectors.get_student_current_allocation(student)
+        if current_alloc and current_alloc.room:
+            room = current_alloc.room
+            room.current_occupancy = max(0, room.current_occupancy - 1)
+            if room.current_occupancy == 0:
+                room.status = 'available'
+            room.save()
+            
+            current_alloc.status = RoomAllocationStatusChoices.VACANT
+            from django.utils import timezone
+            current_alloc.release_date = timezone.now().date()
+            current_alloc.save()
+            
+    elif action == 'verify':
+        vacation.status = 'verified'
+        vacation.remarks = remarks
+        vacation.save()
+        
+    return vacation
+
+
+def create_extended_stay(student, start_date, end_date, reason):
+    """
+    Submit Extended Stay.
+    Enforces:
+    - BR-HM-061: Extended Stay Eligibility (Must have active alloc)
+    - BR-HM-062: Vacation Period Validation
+    """
+    from .models import ExtendedStayApplication
+    
+    # BR-HM-061: Active hostel allocation is required
+    current_allocation = selectors.get_student_current_allocation(student.pk)
+    if not current_allocation or current_allocation.status != RoomAllocationStatusChoices.ALLOCATED:
+        raise HostelManagementException("Student must have active hostel allocation for extended stay.")
+        
+    # BR-HM-062: Date validation
+    from django.utils import timezone
+    today = timezone.now().date()
+    if start_date < today:
+        raise HostelManagementException("Start date cannot be in the past.")
+    if end_date <= start_date:
+        raise HostelManagementException("End date must be after start date.")
+        
+    duration = (end_date - start_date).days
+    if duration > 45:
+        raise HostelManagementException("Extended stay cannot exceed 45 days.")
+        
+    stay = ExtendedStayApplication.objects.create(
+        student=student,
+        start_date=start_date,
+        end_date=end_date,
+        reason=reason,
+        status='pending'
+    )
+    return stay
+    
+    def update_inventory(inventory_id, quantity=None, remarks=None):
+        """
+        Update an inventory item — called by InventoryRetrieveUpdateView.
+        Enforces:
+        - BR-HM-030: Resource Request Validation
+        - BR-HM-021: Discrepancy Logging
+        - BR-HM-031: Inventory Audit Trail
+        """
+        import logging
+        logger = logging.getLogger(__name__)
+    
+        item = selectors.get_inventory_item(inventory_id)
+        if not item:
+            raise HostelManagementException(f"Inventory item {inventory_id} not found.")
+        
+        old_qty = item.quantity
+        
+        if quantity is not None:
+            if quantity < 0:
+                raise HostelManagementException("Quantity cannot be negative.")
+            item.quantity = quantity
+        
+        if remarks is not None:
+            item.remarks = remarks
+            
+        item.save()
+        
+        # BR-HM-021: Discrepancy logging
+        if quantity is not None and quantity < old_qty:
+            logger.warning(
+                f"DISCREPANCY LOG: {item.item_name} at {item.hall.hall_name} decreased from {old_qty} to {quantity}. Remarks: {remarks}"
+            )
+            
+        # BR-HM-031: Audit Trail
+        logger.info(f"INVENTORY AUDIT: Updated item {item.item_name} to Qty: {quantity}")
+        
+        return item

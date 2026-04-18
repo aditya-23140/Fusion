@@ -14,6 +14,7 @@ class LeaveStatusChoices(models.TextChoices):
     PENDING = "pending", "Pending"
     APPROVED = "approved", "Approved"
     REJECTED = "rejected", "Rejected"
+    CANCELLED = "cancelled", "Cancelled"
 
 
 class ComplaintStatusChoices(models.TextChoices):
@@ -35,11 +36,20 @@ class ComplaintCategoryChoices(models.TextChoices):
     OTHER = "other", "Other"
 
 
+class ComplaintPriorityChoices(models.TextChoices):
+    """Complaint priority levels."""
+    LOW = "low", "Low"
+    MEDIUM = "medium", "Medium"
+    HIGH = "high", "High"
+    CRITICAL = "critical", "Critical"
+
+
 class FineStatusChoices(models.TextChoices):
     """Fine payment status."""
     PENDING = "pending", "Pending"
     PAID = "paid", "Paid"
     WAIVED = "waived", "Waived"
+    CANCELLED = "cancelled", "Cancelled"
 
 
 class RoomChangeStatusChoices(models.TextChoices):
@@ -99,33 +109,29 @@ class HostelManagementConstants:
     ("Forward", 'Forward')
     )    
 
-# BookingStatus Enum for business logic and imports
-class BookingStatus:
-    PENDING = "Pending"
-    CONFIRMED = "Confirmed"
-    REJECTED = "Rejected"
-    CANCELED = "Canceled"
-    CANCEL_REQUESTED = "CancelRequested"
-    CHECKED_IN = "CheckedIn"
-    COMPLETE = "Complete"
-    FORWARD = "Forward"
+# Alias for selectors that reference GuestRoomBookingStatusChoices
+GuestRoomBookingStatusChoices = BookingStatusChoices
 
-# LeaveStatus Enum for business logic and imports
-class LeaveStatus:
-    PENDING = "pending"
-    APPROVED = "approved"
-    REJECTED = "rejected"
 
-# FineStatus Enum for business logic and imports
-class FineStatus:
-    PENDING = "Pending"
-    PAID = "Paid"
+class HallStatusChoices(models.TextChoices):
+    """Hostel Hall status options."""
+    ACTIVE = "active", "Active"
+    MAINTENANCE = "maintenance", "Under Maintenance"
+    INACTIVE = "inactive", "Inactive"
 
-# RoomType Enum for business logic and imports
-class RoomType:
-    SINGLE = "single"
-    DOUBLE = "double"
-    TRIPLE = "triple"
+
+class RoomVacationStatusChoices(models.TextChoices):
+    PENDING = "pending", "Pending Clearance"
+    VERIFIED = "verified", "Verified by Caretaker"
+    APPROVED = "approved", "Approved by Warden"
+    COMPLETED = "completed", "Vacation Completed"
+
+
+class ExtendedStayStatusChoices(models.TextChoices):
+    SUBMITTED = "submitted", "Submitted"
+    UNDER_REVIEW = "under_review", "Under Review"
+    APPROVED = "approved", "Approved"
+    REJECTED = "rejected", "Rejected"
 
 
 class Hall(models.Model):
@@ -146,8 +152,8 @@ class Hall(models.Model):
         ('double', 'Double Seater'),
         ('triple', 'Triple Seater'),
     ]
-
     type_of_seater = models.CharField(max_length=50, choices=TYPE_OF_SEATER_CHOICES, default='single')
+    status = models.CharField(max_length=20, choices=HallStatusChoices.choices, default=HallStatusChoices.ACTIVE)
     def __str__(self):
         return self.hall_id 
 
@@ -224,9 +230,7 @@ class GuestRoomBooking(models.Model):
     total_guests = models.IntegerField(default=1)
     purpose = models.TextField()
     arrival_date = models.DateField(auto_now_add=False, auto_now=False)
-    arrival_time = models.TimeField(auto_now_add=False, auto_now=False)
     departure_date = models.DateField(auto_now_add=False, auto_now=False)
-    departure_time = models.TimeField(auto_now_add=False, auto_now=False)
     status = models.CharField(max_length=255, choices=HostelManagementConstants.BOOKING_STATUS, default="Pending")
     booking_date = models.DateField(auto_now_add=False, auto_now=False, default=timezone.now)
     nationality = models.CharField(max_length=255, blank=True)
@@ -308,6 +312,25 @@ class HostelStudentAttendance(models.Model):
     student_id = models.ForeignKey(Student, on_delete=models.CASCADE)
     date = models.DateField()
     present = models.BooleanField()
+    remarks = models.CharField(max_length=255, blank=True, null=True)
+
+    @property
+    def is_present(self):
+        """Alias for present (used by services)."""
+        return self.present
+    
+    @is_present.setter
+    def is_present(self, value):
+        self.present = value
+
+    @property
+    def student(self):
+        """Alias for student_id (used by services/selectors)."""
+        return self.student_id
+    
+    @student.setter
+    def student(self, value):
+        self.student_id = value
     
     def __str__(self):
         return str(self.student_id) + '->' + str(self.date) + '-' + str(self.present)
@@ -433,7 +456,7 @@ class HostelLeave(models.Model):
         choices=LeaveStatusChoices.choices,
         default=LeaveStatusChoices.PENDING
     )
-    remark = models.TextField(blank=True, null=True)
+    remarks = models.TextField(blank=True, null=True)
     approval_date = models.DateField(null=True, blank=True)
     file_upload = models.FileField(upload_to='hostel_management/leaves/', null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -469,12 +492,19 @@ class HostelComplaint(models.Model):
     roll_number = models.CharField(max_length=20)
     hall = models.ForeignKey(Hall, on_delete=models.CASCADE, null=True, blank=True, related_name='complaints')
     hall_name = models.CharField(max_length=100)
+    title = models.CharField(max_length=255, blank=True, default='')
     category = models.CharField(
         max_length=20,
         choices=ComplaintCategoryChoices.choices,
         default=ComplaintCategoryChoices.OTHER
     )
+    priority = models.CharField(
+        max_length=20,
+        choices=ComplaintPriorityChoices.choices,
+        default=ComplaintPriorityChoices.MEDIUM
+    )
     description = models.TextField()
+    location = models.CharField(max_length=255, blank=True, null=True)
     contact_number = models.CharField(max_length=15)
     status = models.CharField(
         max_length=20,
@@ -490,10 +520,29 @@ class HostelComplaint(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
     reviewed_by = models.ForeignKey(Staff, on_delete=models.SET_NULL, null=True, blank=True, related_name='reviewed_complaints')
     escalated_to = models.ForeignKey(Faculty, on_delete=models.SET_NULL, null=True, blank=True, related_name='escalated_complaints')
+    resolved_at = models.DateTimeField(null=True, blank=True)
     
     class Meta:
         db_table = 'hostel_management_hostelcomplaint'
         ordering = ['-created_at']
+
+    @property
+    def resolution_notes(self):
+        """Alias for resolution_remarks (used by services/serializers)."""
+        return self.resolution_remarks
+    
+    @resolution_notes.setter
+    def resolution_notes(self, value):
+        self.resolution_remarks = value
+
+    @property
+    def warden_assigned(self):
+        """Alias for escalated_to (used by services/serializers)."""
+        return self.escalated_to
+    
+    @warden_assigned.setter
+    def warden_assigned(self, value):
+        self.escalated_to = value
 
     def __str__(self):
         return f"Complaint from {self.student_name} in {self.hall_name} - {self.status}"
@@ -796,6 +845,34 @@ class RoomAllocationChange(models.Model):
     
     def __str__(self):
         return f"Room Change: {self.student.user.username} from {self.current_room.room_number} ({self.status})"
+
+class RoomVacationRequest(models.Model):
+    student = models.ForeignKey(Student, on_delete=models.CASCADE, related_name='vacation_requests')
+    room = models.ForeignKey(HallRoom, on_delete=models.CASCADE)
+    hall = models.ForeignKey(Hall, on_delete=models.CASCADE)
+    vacation_date = models.DateField()
+    status = models.CharField(max_length=20, choices=RoomVacationStatusChoices.choices, default="pending")
+    remarks = models.TextField(blank=True, null=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return f"{self.student.id.user.username} - {self.room.room_no} ({self.status})"
+
+class ExtendedStayApplication(models.Model):
+    student = models.ForeignKey(Student, on_delete=models.CASCADE, related_name='extended_stays')
+    room = models.ForeignKey(HallRoom, on_delete=models.CASCADE)
+    hall = models.ForeignKey(Hall, on_delete=models.CASCADE)
+    start_date = models.DateField()
+    end_date = models.DateField()
+    reason = models.TextField()
+    status = models.CharField(max_length=20, choices=ExtendedStayStatusChoices.choices, default="submitted")
+    remarks = models.TextField(blank=True, null=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return f"{self.student.id.user.username} - {self.status}"
 
 
 
