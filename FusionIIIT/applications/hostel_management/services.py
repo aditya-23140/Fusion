@@ -12,12 +12,16 @@ from datetime import timedelta
 from decimal import Decimal
 
 from .models import (
-    HostelLeave, HostelComplaint, RoomAllocation, RoomAllocationChange,
+    HostelLeave, HostelComplaint, RoomAllocationChange,
     HostelFine, HostelStudentAttendance,
-    GuestRoomBooking, GuestRoom,
-    LeaveStatusChoices, ComplaintStatusChoices, RoomAllocationStatusChoices,
-    AllocationChangeStatusChoices, FineStatusChoices, BookingStatusChoices
+    GuestRoomBooking, GuestRoom, Hostel, Room, RoomAllotment,
+    HostelStaffAssignment,
+    AccommodationApplicationWindow, AccommodationRequest,
+    LeaveStatusChoices, ComplaintStatusChoices,
+    AllocationChangeStatusChoices, FineStatusChoices, BookingStatusChoices,
+    StaffRoleChoices
 )
+from django.db import transaction
 from . import selectors
 
 
@@ -124,10 +128,10 @@ def create_leave_request(student, start_date, end_date, reason, destination=None
     - BR-HM-103: Mandatory Leave Justification Policy
     """
     # BR-HM-101: Check if student is currently in hostel
-    current_allocation = selectors.get_student_current_allocation(student)
-    if not current_allocation or current_allocation.status != RoomAllocationStatusChoices.ALLOCATED:
+    current_allotment = selectors.get_active_allotment_by_student(student)
+    if not current_allotment:
         raise LeaveEligibilityError(
-            "Student must have an active hostel allocation to request leave."
+            "Student must have an active hostel allotment to request leave."
         )
     
     # BR-HM-102: Validate leave dates
@@ -159,7 +163,7 @@ def create_leave_request(student, start_date, end_date, reason, destination=None
         destination=destination,
         contact_phone=contact_phone,
         status=LeaveStatusChoices.PENDING,
-        hall=current_allocation.room.hall
+        hostel=current_allotment.hostel
     )
     
     return leave
@@ -242,11 +246,11 @@ def cancel_leave(leave_id):
 
 def _mark_leave_attendance(student, start_date, end_date, is_present):
     """Mark attendance for leave dates."""
-    current_allocation = selectors.get_student_current_allocation(student.id)
+    current_allocation = selectors.get_active_allotment_by_student(student)
     if not current_allocation or not current_allocation.room:
         return
     
-    hall = current_allocation.room.hall
+    hostel = current_allocation.hostel
     current_date = start_date
     
     while current_date <= end_date:
@@ -254,7 +258,7 @@ def _mark_leave_attendance(student, start_date, end_date, is_present):
             student_id=student,
             date=current_date,
             defaults={
-                'hall': hall,
+                'hostel': hostel,
                 'present': is_present,
                 'remarks': 'Leave' if not is_present else None
             }
@@ -262,7 +266,7 @@ def _mark_leave_attendance(student, start_date, end_date, is_present):
         current_date += timedelta(days=1)
 
 
-def mark_attendance(hall, date, attendance_data):
+def mark_attendance(hostel, date, attendance_data):
     """
     Bulk mark attendance for students in a hall.
     attendance_data: list of dicts [{'student_id': id, 'present': bool, 'remarks': str}]
@@ -275,7 +279,7 @@ def mark_attendance(hall, date, attendance_data):
             student_id=student,
             date=date,
             defaults={
-                'hall': hall,
+                'hostel': hostel,
                 'present': entry['present'],
                 'remarks': entry.get('remarks')
             }
@@ -297,10 +301,10 @@ def create_complaint(student, title, description, category, priority, location=N
     - BR-HM-107: Complaint Routing by Category
     """
     # BR-HM-106: Check if student is currently in hostel
-    current_allocation = selectors.get_student_current_allocation(student.id)
-    if not current_allocation or current_allocation.status != RoomAllocationStatusChoices.ALLOCATED:
+    current_allocation = selectors.get_active_allotment_by_student(student)
+    if not current_allocation:
         raise ComplaintEligibilityError(
-            "Only students with active hostel allocation can file complaints."
+            "Only students with active hostel allotment can file complaints."
         )
     
     # Validate complaint data
@@ -310,22 +314,22 @@ def create_complaint(student, title, description, category, priority, location=N
     if not description or len(description.strip()) < 20:
         raise ComplaintRoutingError("Complaint description must be at least 20 characters.")
     
-    # Get hall from student's allocation
-    hall = current_allocation.room.hall
+    # Get hostel from student's allocation
+    hostel = current_allocation.hostel
     
-    # BR-HM-107: Route complaint to appropriate caretaker by category
-    caretaker = selectors.get_hall_caretaker(hall.hall_id)
+    # BR-HM-107: Route complaint to appropriate staff by hostel
+    staff_assignment = selectors.get_hostel_staff(hostel.hall_id).first()
     
     complaint = HostelComplaint.objects.create(
         student=student,
-        hall=hall,
+        hostel=hostel,
         title=title,
         description=description,
         category=category,
         priority=priority,
         location=location,
-        status=ComplaintStatusChoices.OPEN,
-        assigned_to=caretaker.staff if caretaker else None
+        status=ComplaintStatusChoices.SUBMITTED,
+        assigned_to=staff_assignment.user if staff_assignment else None
     )
     
     return complaint
@@ -392,70 +396,116 @@ def escalate_complaint(complaint_id, warden):
 
 
 # ══════════════════════════════════════════════════════════════
-# HM-WF-103: ROOM ALLOCATION SERVICES
+# HM-WF-103: ACCOMMODATION SERVICES
 # ══════════════════════════════════════════════════════════════
 
-def bulk_allocate_rooms(room_allocations_data):
+def create_accommodation_request(student, window_id, preferred_hostel_type, preferred_room_type):
     """
-    Bulk allocate rooms to students.
-    
-    Enforces:
-    - BR-HM-112: Bulk Allotment Capacity Safeguard
-    - BR-HM-113: Super Admin Allotment Authority
+    Submits a new accommodation request for a student.
+    - BR-HM-111: Application Window Enforcement
     """
-    created_allocations = []
-    
-    for alloc_data in room_allocations_data:
-        student = alloc_data['student']
-        room = alloc_data['room']
-        
-        # BR-HM-112: Check room capacity
-        occupied_count = selectors.count_occupied_seats_in_room(room.id)
-        if occupied_count >= room.capacity:
-            raise AllotmentCapacityError(
-                f"Room {room.room_number} is at full capacity ({room.capacity}/{room.capacity})."
-            )
-          # Create allocation
-        allocation = RoomAllocation.objects.create(
-            student=student,
-            room=room,
-            hall=alloc_data.get('hall'),
-            allocation_date=timezone.now().date(),
-            status=RoomAllocationStatusChoices.ALLOCATED,
-            allocated_by=alloc_data.get('allocated_by')
-        )
-        
-        created_allocations.append(allocation)
-        
-        # Update room occupancy
-        room.current_occupancy = occupied_count + 1
-        room.save()
-    
-    return created_allocations
+    window = AccommodationApplicationWindow.objects.filter(id=window_id).first()
+    if not window or not window.is_open:
+        raise ApplicationWindowError("The application window is currently closed.")
+
+    # Check for existing request
+    if selectors.get_student_accommodation_request(student, window):
+        raise HostelManagementException("You have already submitted a request for this window.")
+
+    request = AccommodationRequest.objects.create(
+        student=student,
+        window=window,
+        preferred_hostel_type=preferred_hostel_type,
+        preferred_room_type=preferred_room_type,
+        status=AccommodationRequest.Status.PENDING
+    )
+    return request
 
 
-def release_room_allocation(allocation_id):
-    """Release a student from their room allocation."""
-    allocation = selectors.get_allocation_by_id(allocation_id)
-    if not allocation:
-        raise HostelManagementException(f"Allocation {allocation_id} not found.")
-    
-    if allocation.status != RoomAllocationStatusChoices.ALLOCATED:
-        raise HostelManagementException(
-            f"Cannot release allocation in {allocation.status} status."
+def perform_bulk_allotment(request_ids, allotted_by):
+    """
+    Performs bulk allotment for selected requests.
+    - BR-HM-112: Capacity Safeguard
+    - BR-HM-113: Transaction Safety with select_for_update
+    - BR-HM-114: Notification Trigger (Stub)
+    """
+    results = {
+        'success': [],
+        'failed': []
+    }
+
+    with transaction.atomic():
+        # Lock requests and related student profiles
+        requests = AccommodationRequest.objects.select_for_update().filter(
+            id__in=request_ids,
+            status=AccommodationRequest.Status.PENDING
         )
-    
-    # Update allocation
-    allocation.status = RoomAllocationStatusChoices.VACANT
-    allocation.release_date = timezone.now().date()
-    allocation.save()
-    
-    # Update room occupancy
-    if allocation.room:
-        allocation.room.current_occupancy = max(0, allocation.room.current_occupancy - 1)
-        allocation.room.save()
-    
-    return allocation
+
+        for req in requests:
+            try:
+                # Find suitable room using selector
+                # Criteria: matches preferred_hostel_type and preferred_room_type
+                # AND current_occupancy < capacity
+                suitable_rooms = Room.objects.select_for_update().filter(
+                    hostel__type=req.preferred_hostel_type,
+                    capacity__gt=F('current_occupancy'),
+                    hostel__status='Active' # Depend on Chunk 1 Hostel status
+                ).order_by('floor', 'room_number')
+
+                # For simplicity, we filter room type by capacity (Single=1, Double=2, etc. - usually defined in business rules)
+                # Here we assume room_type maps to capacity for filter
+                # Single=1, Double=2, Triple=3
+                capacity_map = {'Single': 1, 'Double': 2, 'Triple': 3}
+                preferred_capacity = capacity_map.get(req.preferred_room_type, 1)
+                
+                room = suitable_rooms.filter(capacity=preferred_capacity).first()
+
+                if not room:
+                    results['failed'].append({
+                        'request_id': req.id,
+                        'reason': 'No suitable rooms available for preferred types.'
+                    })
+                    continue
+
+                # Create Allotment
+                allotment = RoomAllotment.objects.create(
+                    student=req.student,
+                    room=room,
+                    hostel=room.hostel,
+                    allotted_by=allotted_by,
+                    is_active=True
+                )
+
+                # Update Room occupancy
+                room.current_occupancy += 1
+                room.save()
+
+                # Update Request status
+                req.status = AccommodationRequest.Status.ALLOTTED
+                req.save()
+
+                results['success'].append({
+                    'request_id': req.id,
+                    'room_number': room.room_number,
+                    'hostel_name': room.hostel.name
+                })
+
+                # BR-HM-114: Trigger Notification
+                _trigger_allotment_notification(allotment)
+
+            except Exception as e:
+                results['failed'].append({
+                    'request_id': req.id,
+                    'reason': str(e)
+                })
+
+    return results
+
+
+def _trigger_allotment_notification(allotment):
+    """Placeholder for BR-HM-114: Mandatory Allotment Notification."""
+    # In a real system, this would queue a task or send a signal
+    print(f"NOTIFICATION: Student {allotment.student.id.user.username} allotted to {allotment.room.room_number}")
 
 
 # ══════════════════════════════════════════════════════════════
@@ -470,11 +520,12 @@ def request_room_change(student, current_room, requested_room, reason):
     - BR-HM-115: Room Change Eligibility Rule
     """
     # BR-HM-115: Student must have current allocation
-    current_allocation = selectors.get_student_current_allocation(student.pk)
-    if not current_allocation or current_allocation.status != RoomAllocationStatusChoices.ALLOCATED:
+    current_allocation = selectors.get_active_allotment_by_student(student)
+    if not current_allocation:
         raise RoomChangeEligibilityError(
             "Student must have an active hostel allocation to request room change."
         )
+
     
     # Check if currently allocated room matches
     if current_allocation.room != current_room:
@@ -539,6 +590,8 @@ def approve_room_change_caretaker(change_id, caretaker, remarks=None):
     - BR-HM-116: Dual Approval Requirement (completes dual approval)
     - BR-HM-117: Occupancy Reconciliation on Room Change
     """
+    from .models import RoomAllotment
+    
     change = selectors.get_room_change(change_id)
     if not change:
         raise HostelManagementException(f"Room change {change_id} not found.")
@@ -549,43 +602,49 @@ def approve_room_change_caretaker(change_id, caretaker, remarks=None):
         )
     
     # BR-HM-117: Check capacity of requested room
-    occupied_count = selectors.count_occupied_seats_in_room(change.requested_room.id)
-    if occupied_count >= change.requested_room.capacity:
+    if change.requested_room.current_occupancy >= change.requested_room.capacity:
         raise AllotmentCapacityError(
             f"Requested room is at full capacity and cannot accommodate change."
         )
     
-    # Update allocations
-    current_allocation = selectors.get_student_current_allocation(change.student)
-    if current_allocation:
-        # Release from current room
-        current_allocation.status = RoomAllocationStatusChoices.VACANT
-        current_allocation.release_date = timezone.now().date()
-        current_allocation.save()
+    with transaction.atomic():
+        # Update allotments (new model 'RoomAllotment')
+        current_allotment = selectors.get_active_allotment_by_student(change.student)
+        if current_allotment:
+            # Release from current room
+            current_allotment.is_active = False
+            current_allotment.vacated_at = timezone.now()
+            current_allotment.save()
+            
+            # Update current room occupancy
+            if current_allotment.room:
+                current_allotment.room.current_occupancy = max(0, current_allotment.room.current_occupancy - 1)
+                if current_allotment.room.current_occupancy < current_allotment.room.capacity:
+                    current_allotment.room.status = 'Available'
+                current_allotment.room.save()
         
-        # Update current room occupancy
-        if current_allocation.room:
-            current_allocation.room.current_occupancy = max(0, current_allocation.room.current_occupancy - 1)
-            current_allocation.room.save()
-    
-    # Create new allocation in requested room
-    new_allocation = RoomAllocation.objects.create(
-        student=change.student,
-        room=change.requested_room,
-        allocation_date=timezone.now().date(),
-        status=RoomAllocationStatusChoices.ALLOCATED
-    )
-    
-    # Update requested room occupancy
-    change.requested_room.current_occupancy += 1
-    change.requested_room.save()
-      # Update change request
-    change.status = AllocationChangeStatusChoices.COMPLETED
-    change.approved_by_caretaker = caretaker
-    change.caretaker_approval_date = timezone.now()
-    change.caretaker_remarks = remarks
-    change.effective_date = timezone.now().date()
-    change.save()
+        # Create new allotment in requested room
+        RoomAllotment.objects.create(
+            student=change.student,
+            room=change.requested_room,
+            hostel=change.requested_room.hostel,
+            allotted_by=caretaker,
+            is_active=True
+        )
+        
+        # Update requested room occupancy
+        change.requested_room.current_occupancy += 1
+        if change.requested_room.current_occupancy >= change.requested_room.capacity:
+            change.requested_room.status = 'Occupied'
+        change.requested_room.save()
+        
+        # Update change request
+        change.status = AllocationChangeStatusChoices.COMPLETED
+        change.approved_by_caretaker = caretaker
+        change.caretaker_approval_date = timezone.now()
+        change.caretaker_remarks = remarks
+        change.effective_date = timezone.now().date()
+        change.save()
     
     # BR-HM-118: Send mandatory room change notification
     send_room_change_notification(change)
@@ -619,7 +678,7 @@ def reject_room_change(change_id, rejection_reason):
 # HM-WF-105: FINE MANAGEMENT SERVICES
 # ══════════════════════════════════════════════════════════════
 
-def issue_fine(student, hall, fine_type, amount, reason, due_date, issued_by):
+def issue_fine(student, hostel, fine_type, amount, reason, due_date, issued_by):
     """
     Issue a fine to a student.
     
@@ -627,8 +686,8 @@ def issue_fine(student, hall, fine_type, amount, reason, due_date, issued_by):
     - BR-HM-013: Fine Imposition Validation
     """
     # BR-HM-013: Validate fine data
-    if not student or not hall:
-        raise FineValidationError("Student and hall are required to issue a fine.")
+    if not student or not hostel:
+        raise FineValidationError("Student and hostel are required to issue a fine.")
     
     if amount <= 0:
         raise FineValidationError("Fine amount must be greater than zero.")
@@ -639,15 +698,9 @@ def issue_fine(student, hall, fine_type, amount, reason, due_date, issued_by):
     if not reason or len(reason.strip()) < 10:
         raise FineValidationError("Fine reason must be at least 10 characters.")
     
-    # Check if student is/was in this hall
-    current_allocation = selectors.get_student_current_allocation(student.id)
-    if not current_allocation or current_allocation.room.hall != hall:
-        # Allow issuing fine even if student has left, but check recent allocation
-        pass
-    
     fine = HostelFine.objects.create(
         student=student,
-        hall=hall,
+        hostel=hostel,
         fine_type=fine_type,
         amount=Decimal(str(amount)),
         reason=reason,
@@ -898,6 +951,56 @@ def check_out_guest(booking_id):
 # NOTIFICATION HELPERS - BR-HM-118 & Related
 # ══════════════════════════════════════════════════════════════
 
+def assign_warden_to_hostel(hostel, faculty):
+    """
+    Assign a warden to a hostel (Super Admin only).
+    """
+    # Remove existing active warden if any
+    HostelStaffAssignment.objects.filter(
+        hostel=hostel, 
+        role=StaffRoleChoices.WARDEN, 
+        is_active=True
+    ).update(is_active=False)
+    
+    # Assign new warden
+    assignment = HostelStaffAssignment.objects.create(
+        hostel=hostel,
+        user=faculty.id.user,
+        role=StaffRoleChoices.WARDEN,
+        is_active=True
+    )
+    return assignment
+
+
+def assign_caretaker_to_hostel(hostel, staff):
+    """
+    Assign a caretaker to a hostel (Super Admin only).
+    """
+    # Remove existing active caretaker if any
+    HostelStaffAssignment.objects.filter(
+        hostel=hostel, 
+        role=StaffRoleChoices.CARETAKER, 
+        is_active=True
+    ).update(is_active=False)
+    
+    # Assign new caretaker
+    assignment = HostelStaffAssignment.objects.create(
+        hostel=hostel,
+        user=staff.id.user,
+        role=StaffRoleChoices.CARETAKER,
+        is_active=True
+    )
+    return assignment
+
+
+def allocate_batch_to_hostel(hostel, academic_batch):
+    """
+    Allocate an academic batch to a hostel (Super Admin only).
+    """
+    hostel.save()
+    return hostel
+
+
 def send_room_change_notification(change_request):
     """
     Send notification for room change completion.
@@ -914,7 +1017,7 @@ def send_room_change_notification(change_request):
 # SUPER ADMIN MANAGEMENT SERVICES
 # ══════════════════════════════════════════════════════════════
 
-def assign_warden_to_hall(hall, faculty):
+def assign_warden_to_hostel(hostel, faculty):
     """
     Assign a warden to a hall (Super Admin only).
     
@@ -928,13 +1031,13 @@ def assign_warden_to_hall(hall, faculty):
     from .models import HallWarden
     
     # Remove existing warden if any
-    existing_wardens = HallWarden.objects.filter(hall=hall)
+    existing_wardens = HallWarden.objects.filter(hostel=hostel)
     if existing_wardens.exists():
         existing_wardens.delete()
     
     # Assign new warden
     warden = HallWarden.objects.create(
-        hall=hall,
+        hostel=hostel,
         faculty=faculty
     )
     return warden
@@ -991,12 +1094,12 @@ def get_active_batch_years():
     Returns:
         List of active batches
     """
-    from applications.programme_curriculum.models import AcademicBatch
+    from applications.programme_curriculum.models import Batch
     
     # Get all active batches
-    active_batches = AcademicBatch.objects.filter(
-        is_active=True
-    ).values('id', 'batch_id', 'discipline', 'year').distinct()
+    active_batches = Batch.objects.filter(
+        running_batch=True
+    ).values('id', 'discipline__acronym', 'year').distinct()
     
     return list(active_batches)
 
@@ -1307,3 +1410,138 @@ def create_extended_stay(student, start_date, end_date, reason):
         logger.info(f"INVENTORY AUDIT: Updated item {item.item_name} to Qty: {quantity}")
         
         return item
+# --------------------------------------------------------------
+# HM-WF-103: ACCOMMODATION REQUEST & ALLOTMENT SERVICES
+# --------------------------------------------------------------
+
+@transaction.atomic
+def create_accommodation_request(student, window_id, preferred_hostel_type, preferred_room_type):
+    from .models import AccommodationApplicationWindow, AccommodationRequest
+    window = AccommodationApplicationWindow.objects.get(id=window_id)
+    if not window.is_open:
+        raise ApplicationWindowError(f'Application window {window.name} is currently closed.')
+    request, created = AccommodationRequest.objects.get_or_create(
+        student=student, window=window,
+        defaults={'preferred_hostel_type': preferred_hostel_type, 'preferred_room_type': preferred_room_type}
+    )
+    if not created:
+        request.preferred_hostel_type = preferred_hostel_type
+        request.preferred_room_type = preferred_room_type
+        request.save()
+    return request
+
+@transaction.atomic
+def perform_bulk_allotment_logic(request_ids, allotted_by):
+    from django.db.models import F
+    from .models import AccommodationRequest, Hostel, Room, RoomAllotment, HostelStatusChoices, RoomSetupStatusChoices
+    results = {'success': [], 'failed': []}
+    requests = AccommodationRequest.objects.filter(id__in=request_ids, status=AccommodationRequest.Status.PENDING)
+    for req in requests:
+        try:
+            suitable_hostels = Hostel.objects.filter(type=req.preferred_hostel_type, status=HostelStatusChoices.ACTIVE)
+            allotted = False
+            for hostel in suitable_hostels:
+                available_room = Room.objects.filter(hostel=hostel, current_occupancy__lt=F('capacity'), status=RoomSetupStatusChoices.AVAILABLE).first()
+                if available_room:
+                    RoomAllotment.objects.filter(student=req.student, is_active=True).update(is_active=False)
+                    RoomAllotment.objects.create(student=req.student, room=available_room, hostel=hostel, allotted_by=allotted_by)
+                    available_room.current_occupancy += 1
+                    available_room.save()
+                    req.status = AccommodationRequest.Status.ALLOTTED
+                    req.save()
+                    results['success'].append(req.id)
+                    allotted = True
+                    break
+            if not allotted:
+                results['failed'].append({'id': req.id, 'reason': 'No capacity available'})
+        except Exception as e:
+            results['failed'].append({'id': req.id, 'reason': str(e)})
+    return results
+
+def perform_bulk_batch_allocation(hall_id, programme_category, admission_year, gender, allotted_by):
+    """
+    Perform sequential bulk batch allocation.
+    - Matches students by category, admission year, and gender.
+    - Only considers students without active allotments.
+    - Fills rooms floor-by-floor, topping up partially filled rooms first.
+    """
+    from django.db import transaction
+    from django.db.models import F
+    from django.shortcuts import get_object_or_404
+    from applications.academic_information.models import Student
+    from .models import Hostel, Room, RoomAllotment, RoomSetupStatusChoices
+
+    # 1. Map programme category to actual programme strings
+    category_map = {
+        'UG': ['B.Tech', 'B.Des'],
+        'PG': ['M.Des', 'PhD'],
+        'M.Tech': ['M.Tech']
+    }
+    programmes = category_map.get(programme_category, [])
+
+    with transaction.atomic():
+        # 2. Identify target Hostel and verify gender
+        hostel = get_object_or_404(Hostel, hall_id=hall_id)
+        
+        # Gender mismatch check (prevent cross-gender bulk allocation)
+        if gender == 'M' and hostel.type == 'Girl':
+             raise ValueError(f"Hostel {hall_id} is for Girls, but Male students selected.")
+        if gender == 'F' and hostel.type == 'Boy':
+             raise ValueError(f"Hostel {hall_id} is for Boys, but Female students selected.")
+
+        # 3. Fetch eligible students (Sequential by their ID/username)
+        students = Student.objects.filter(
+            programme__in=programmes,
+            batch=admission_year,
+            id__sex=gender
+        ).exclude(
+            room_allotments__is_active=True
+        ).select_related('id__user').order_by('id__user__username')
+        
+        # Load students into memory to avoid N+1 query performance bottleneck during iteration
+        students_list = list(students)
+        total_students = len(students_list)
+        if total_students == 0:
+            return {'count': 0, 'total_found': 0, 'message': 'No eligible students found for this batch.'}
+
+        # 4. Fetch available rooms, sorted by floor then room number
+        # We fill partially occupied rooms first within the same floor priority
+        available_rooms = Room.objects.filter(
+            hostel=hostel,
+            status=RoomSetupStatusChoices.AVAILABLE,
+            current_occupancy__lt=F('capacity')
+        ).order_by('floor', 'room_number')
+
+        allotted_count = 0
+        student_idx = 0
+        
+        for room in available_rooms:
+            if student_idx >= total_students:
+                break
+                
+            while room.current_occupancy < room.capacity and student_idx < total_students:
+                student = students_list[student_idx]
+                
+                # Create Allotment
+                RoomAllotment.objects.create(
+                    student=student,
+                    room=room,
+                    hostel=hostel,
+                    allotted_by=allotted_by,
+                    is_active=True
+                )
+                
+                room.current_occupancy += 1
+                allotted_count += 1
+                student_idx += 1
+            
+            # Update room status if full
+            if room.current_occupancy >= room.capacity:
+                room.status = RoomSetupStatusChoices.OCCUPIED
+            room.save()
+            
+        return {
+            'count': allotted_count,
+            'total_found': total_students,
+            'message': f"Successfully allotted {allotted_count} of {total_students} students."
+        }

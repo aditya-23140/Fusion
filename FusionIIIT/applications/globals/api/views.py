@@ -87,12 +87,15 @@ def auth_view(request):
         designation_info.insert(0, "super_admin")
 
     # Add hostel management roles (warden/caretaker) if user has assignments
-    from applications.hostel_management.models import HallWarden, HallCaretaker
+    from applications.hostel_management.models import HallWarden, HallCaretaker, HostelStaffAssignment, StaffRoleChoices
     
-    if HallWarden.objects.filter(faculty__id__user=user).exists() and "warden" not in designation_info:
+    # Check Modern Assignments
+    hostel_assignments = HostelStaffAssignment.objects.filter(user=user, is_active=True).values_list('role', flat=True)
+    
+    if (StaffRoleChoices.WARDEN in hostel_assignments or HallWarden.objects.filter(faculty__id__user=user, is_active=True).exists()) and "warden" not in designation_info:
         designation_info.append("warden")
     
-    if HallCaretaker.objects.filter(staff__id__user=user).exists() and "caretaker" not in designation_info:
+    if (StaffRoleChoices.CARETAKER in hostel_assignments or HallCaretaker.objects.filter(staff__id__user=user, is_active=True).exists()) and "caretaker" not in designation_info:
         designation_info.append("caretaker")
 
     accessible_modules = {}

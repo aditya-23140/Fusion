@@ -5,15 +5,13 @@ from .models import *
 # ══════════════════════════════════════════════════════════════
 # HALL & STAFF MANAGEMENT
 # ══════════════════════════════════════════════════════════════
-admin.site.register(Hall)
-admin.site.register(HallCaretaker)
-admin.site.register(HallWarden)
-admin.site.register(HallRoom)
+admin.site.register(Hostel)
+admin.site.register(HostelStaffAssignment)
+admin.site.register(Room)
 
 # ══════════════════════════════════════════════════════════════
 # ROOM ALLOCATION & CHANGES (HM-WF-103, HM-WF-104)
 # ══════════════════════════════════════════════════════════════
-admin.site.register(RoomAllocation)
 admin.site.register(RoomAllocationChange)
 admin.site.register(RoomChangeRequest)
 

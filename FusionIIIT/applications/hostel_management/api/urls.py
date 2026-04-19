@@ -5,19 +5,6 @@ CRITICAL RULES:
 - Only router definitions and URL patterns here
 - No views, no logic
 - Use viewsets with DefaultRouter for RESTful consistency
-
-URL Structure:
-/api/hostel-management/
-├── halls/                           - Hall management
-├── leaves/                          - Leave requests (HM-WF-101)
-├── complaints/                      - Complaints (HM-WF-102)
-├── room-allocations/               - Room allocation (HM-WF-103)
-├── room-changes/                   - Room changes (HM-WF-104)
-├── fines/                          - Fine management (HM-WF-105)
-├── schedules/                      - Staff schedules (HM-WF-107)
-├── inventory/                      - Inventory (HM-WF-108)
-├── guest-bookings/                - Guest room bookings (HM-WF-112)
-└── notices/                        - Notice board (HM-WF-110)
 """
 
 from django.urls import path, include
@@ -26,28 +13,33 @@ from . import views
 app_name = 'hostel_management_api'
 
 # ══════════════════════════════════════════════════════════════
-# HALL MANAGEMENT ROUTES
+# HOSTEL SETUP FOUNDATION ROUTES (Modernized)
 # ══════════════════════════════════════════════════════════════
-hall_patterns = [
-    path('', views.HallListCreateView.as_view(), name='hall-list-create'),
-    path('<int:pk>/', views.HallRetrieveUpdateDestroyView.as_view(), name='hall-detail'),
-    path('<int:pk>/rooms/', views.HallRoomListCreateView.as_view(), name='hall-rooms-list-create'),
-    path('<int:hall_pk>/rooms/<int:pk>/', views.HallRoomRetrieveUpdateDestroyView.as_view(), name='hall-room-detail'),
+hostel_setup_patterns = [
+    path('', views.ListHostelsView.as_view(), name='hostel-list'),
+    path('create/', views.CreateHostelView.as_view(), name='hostel-create'),
+    path('<str:pk>/', views.RetrieveHostelView.as_view(), name='hostel-detail'),
+    path('<str:pk>/status/', views.ManageHostelStatusView.as_view(), name='hostel-status'),
+    path('<str:pk>/assign-warden/', views.AssignWardenView.as_view(), name='hostel-assign-warden'),
+    path('<str:pk>/assign-caretaker/', views.AssignCaretakerView.as_view(), name='hostel-assign-caretaker'),
+    path('<str:pk>/reassign-staff/', views.ReassignStaffView.as_view(), name='hostel-reassign-staff'),
+    path('<str:pk>/staff/', views.ListStaffAssignmentsView.as_view(), name='hostel-staff-list'),
+    path('staff-assignments/<int:pk>/remove/', views.RemoveStaffAssignmentView.as_view(), name='hostel-staff-remove'),
+    path('<str:pk>/delete/', views.DeleteHostelView.as_view(), name='hostel-delete'),
+    path('<str:pk>/bulk-batch-allot/', views.BulkBatchAllocationView.as_view(), name='hostel-bulk-batch-allot'),
 ]
 
 # ══════════════════════════════════════════════════════════════
-# SUPER ADMIN MANAGEMENT ROUTES
+# ACCOMMODATION REQUEST & ALLOTMENT ROUTES (HM-WF-103)
 # ══════════════════════════════════════════════════════════════
-admin_patterns = [
-    path('assign-warden/', views.WardenAssignmentView.as_view(), name='assign-warden'),
-    path('assign-caretaker/', views.CaretakerAssignmentView.as_view(), name='assign-caretaker'),
-    path('assignments/', views.StaffAssignmentListView.as_view(), name='assignments-list'),
-    path('assignments/<int:pk>/', views.StaffAssignmentDeleteView.as_view(), name='assignments-delete'),
-    path('faculty/', views.FacultyListView.as_view(), name='faculty-list'),
-    path('staff/', views.StaffListView.as_view(), name='staff-list'),
-    path('allocate-batch/', views.BatchAllocationView.as_view(), name='allocate-batch'),
-    path('active-batches/', views.ActiveBatchYearsView.as_view(), name='active-batches'),
-    path('rooms/<int:pk>/rename/', views.RoomRenameView.as_view(), name='room-rename'),
+accommodation_patterns = [
+    path('windows/', views.ListWindowsView.as_view(), name='windows-list'),
+    path('request/', views.SubmitAccommodationRequestView.as_view(), name='request-submit'),
+    path('requests/', views.ListRequestsView.as_view(), name='requests-list'),
+    path('capacity/', views.RoomCapacityDashboardView.as_view(), name='capacity-dashboard'),
+    path('bulk-allot/', views.BulkAllotmentView.as_view(), name='bulk-allot'),
+    path('my-allotment/', views.MyAllotmentView.as_view(), name='my-allotment'),
+    path('allotments/', views.RoomAllotmentListView.as_view(), name='allotment-list'),
 ]
 
 # ══════════════════════════════════════════════════════════════
@@ -70,16 +62,6 @@ complaint_patterns = [
     path('<int:pk>/', views.ComplaintRetrieveUpdateView.as_view(), name='complaint-detail'),
     path('<int:pk>/escalate/', views.ComplaintEscalateView.as_view(), name='complaint-escalate'),
     path('<int:pk>/resolve/', views.ComplaintResolveView.as_view(), name='complaint-resolve'),
-]
-
-# ══════════════════════════════════════════════════════════════
-# ROOM ALLOCATION ROUTES (HM-WF-103)
-# ══════════════════════════════════════════════════════════════
-allocation_patterns = [
-    path('', views.RoomAllocationListView.as_view(), name='allocation-list'),
-    path('<int:pk>/', views.RoomAllocationRetrieveView.as_view(), name='allocation-detail'),
-    path('<int:pk>/delete/', views.RoomAllocationDestroyView.as_view(), name='allocation-delete'),
-    path('bulk-allocate/', views.BulkRoomAllocationView.as_view(), name='bulk-allocate'),
 ]
 
 # ══════════════════════════════════════════════════════════════
@@ -142,26 +124,8 @@ guest_booking_patterns = [
 # ATTENDANCE MANAGEMENT ROUTES
 # ══════════════════════════════════════════════════════════════
 attendance_patterns = [
-    path('hall/<str:hall_id>/', views.AttendanceByHallView.as_view(), name='attendance-by-hall'),
+    path('hostel/<str:hall_id>/', views.AttendanceByHostelView.as_view(), name='attendance-list'),
     path('mark/', views.AttendanceMarkView.as_view(), name='attendance-mark'),
-]
-
-# ══════════════════════════════════════════════════════════════
-# MAIN URL PATTERNS - Namespace organization
-# ══════════════════════════════════════════════════════════════
-urlpatterns = [
-    path('halls/', include((hall_patterns, 'halls'))),
-    path('admin/', include((admin_patterns, 'admin'))),
-    path('leaves/', include((leave_patterns, 'leaves'))),
-    path('complaints/', include((complaint_patterns, 'complaints'))),
-    path('room-allocations/', include((allocation_patterns, 'allocations'))),
-    path('room-changes/', include((room_change_patterns, 'room-changes'))),
-    path('fines/', include((fine_patterns, 'fines'))),
-    path('schedules/', include((schedule_patterns, 'schedules'))),
-    path('inventory/', include((inventory_patterns, 'inventory'))),
-    path('notices/', include((notice_patterns, 'notices'))),
-    path('guest-bookings/', include((guest_booking_patterns, 'guest-bookings'))),
-    path('attendance/', include((attendance_patterns, 'attendance'))),
 ]
 
 # ══════════════════════════════════════════════════════════════
@@ -181,7 +145,21 @@ extended_stay_patterns = [
     path('<int:pk>/reject/', views.ExtendedStayRejectView.as_view(), name='extendedstay-reject'),
 ]
 
-urlpatterns.extend([
+# ══════════════════════════════════════════════════════════════
+# MAIN URL PATTERNS - Namespace organization
+# ══════════════════════════════════════════════════════════════
+urlpatterns = [
+    path('hostels/', include((hostel_setup_patterns, 'hostels-setup'))),
+    path('leaves/', include((leave_patterns, 'leaves'))),
+    path('complaints/', include((complaint_patterns, 'complaints'))),
+    path('accommodation/', include((accommodation_patterns, 'accommodation'))),
+    path('room-changes/', include((room_change_patterns, 'room-changes'))),
+    path('fines/', include((fine_patterns, 'fines'))),
+    path('schedules/', include((schedule_patterns, 'schedules'))),
+    path('inventory/', include((inventory_patterns, 'inventory'))),
+    path('notices/', include((notice_patterns, 'notices'))),
+    path('guest-bookings/', include((guest_booking_patterns, 'guest-bookings'))),
+    path('attendance/', include((attendance_patterns, 'attendance'))),
     path('vacations/', include((vacation_patterns, 'vacations'))),
     path('extended-stays/', include((extended_stay_patterns, 'extended-stays'))),
-])
+]

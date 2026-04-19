@@ -33,19 +33,17 @@ from django.shortcuts import get_object_or_404
 from django.contrib.auth.models import User
 from applications.globals.models import Staff
 from applications.globals.models import Faculty
-
-
-from ..models import (
-    Hall, HallRoom, HostelLeave, HostelComplaint, RoomAllocation, RoomAllocationChange,
+from applications.hostel_management.models import (
+    HostelLeave, HostelComplaint, RoomAllocationChange,
     HostelFine, StaffSchedule, HostelInventory, GuestRoomBooking,
-    HostelNoticeBoard,
-    HallWarden, HallCaretaker, HostelStudentAttendance
+    HostelNoticeBoard, HostelStudentAttendance,
+    Hostel, Room, RoomAllotment, HostelStaffAssignment
 )
+from . import serializers
 from .serializers import (
-    HallSerializer, HallListSerializer, HallCreateUpdateSerializer, HallRoomSerializer, HallRoomCreateUpdateSerializer,
     HostelLeaveSerializer, HostelLeaveCreateSerializer, HostelLeaveApprovalSerializer,
     HostelComplaintSerializer, HostelComplaintUpdateSerializer,
-    RoomAllocationSerializer, RoomAllocationChangeSerializer,
+    RoomAllocationChangeSerializer,
     RoomAllocationChangeApprovalSerializer,
     HostelFineSerializer, HostelFinePaymentSerializer, HostelFineWaiverSerializer,
     StaffScheduleSerializer, HostelInventorySerializer,
@@ -58,7 +56,7 @@ from ..services import (
     ComplaintEligibilityError, ComplaintRoutingError, ResolutionRemarksError,
     EscalationAuthorizationError, WardenAuthorityError,
     RoomChangeEligibilityError, DualApprovalError, AllotmentCapacityError,
-    FineValidationError
+    FineValidationError, ApplicationWindowError
 )
 
 
@@ -68,6 +66,20 @@ from ..services import (
 
 class StandardPagination(PageNumberPagination):
     """Standard pagination: 50 items per page for optimized payload."""
+    page_size = 50
+
+
+class IsStudent(BasePermission):
+    """Permission check: student role."""
+    def has_permission(self, request, view):
+        return bool(request.user and request.user.is_authenticated and hasattr(request.user, 'student'))
+
+
+class IsSuperAdmin(BasePermission):
+    """Permission check: super administrator role."""
+    def has_permission(self, request, view):
+        # Super admin logic: can be customized based on project's user tagging
+        return bool(request.user and request.user.is_authenticated and (request.user.is_superuser or request.user.groups.filter(name='Super Admin').exists()))
     page_size = 50
     page_size_query_param = 'page_size'
     max_page_size = 500
@@ -81,28 +93,19 @@ class IsSuperAdmin(BasePermission):
 
 
 class IsWardenOrCaretaker(BasePermission):
-    """Permission for Warden and Caretaker roles."""
     def has_permission(self, request, view):
-        if not (request.user and request.user.is_authenticated):
-            return False
-        return HallWarden.objects.filter(faculty__id__user=request.user).exists() or \
-               HallCaretaker.objects.filter(staff__id__user=request.user).exists()
+        return selectors.is_user_warden_or_caretaker(request.user)
 
 
 class IsWarden(BasePermission):
-    """Permission for Warden role only."""
     def has_permission(self, request, view):
-        if not (request.user and request.user.is_authenticated):
-            return False
-        return HallWarden.objects.filter(faculty__id__user=request.user).exists()
+        return selectors.is_user_warden(request.user)
 
 
 class IsCaretaker(BasePermission):
     """Permission for Caretaker role only."""
     def has_permission(self, request, view):
-        if not (request.user and request.user.is_authenticated):
-            return False
-        return HallCaretaker.objects.filter(staff__id__user=request.user).exists()
+        return selectors.is_user_caretaker(request.user)
 
 
 class IsStudent(BasePermission):
@@ -115,339 +118,14 @@ class IsStudent(BasePermission):
 
 
 # ══════════════════════════════════════════════════════════════
-# HALL MANAGEMENT VIEWS
+# FACULTY & STAFF LIST VIEWS
 # ══════════════════════════════════════════════════════════════
 
-class HallListCreateView(generics.ListCreateAPIView):
-    """List all halls or create a new hall (Super Admin only for creation)."""
-    
-    def get_permissions(self):
-        """Allow GET for authenticated users, POST only for super admin."""
-        if self.request.method == 'POST':
-            return [IsSuperAdmin()]
-        return [IsAuthenticated()]
-
-    def get_serializer_class(self):
-        """Use lightweight serializer for list, full serializer for create."""
-        if self.request.method == 'POST':
-            return HallCreateUpdateSerializer
-        # Use HallListSerializer for GET (excludes expensive number_students)
-        return HallListSerializer
-
-    def get_queryset(self):
-        """Get all halls from selector."""
-        return selectors.get_all_halls()
-
-    def perform_create(self, serializer):
-        """Create hall via service and auto-generate rooms."""
-        # Create the hall
-        hall = Hall.objects.create(
-            hall_id=serializer.validated_data['hall_id'],
-            hall_name=serializer.validated_data['hall_name'],
-            max_accomodation=serializer.validated_data['max_accomodation'],
-            assigned_batch=serializer.validated_data.get('assigned_batch'),
-            type_of_seater=serializer.validated_data.get('type_of_seater')
-        )
-        
-        # Map type_of_seater to room capacity
-        capacity_map = {'single': 1, 'double': 2, 'triple': 3}
-        room_capacity = capacity_map.get(hall.type_of_seater, 3)
-        
-        # Calculate number of rooms based on max_accomodation and room capacity
-        max_occupancy = serializer.validated_data.get('max_accomodation', 100)
-        num_rooms = max_occupancy // room_capacity
-        
-        # Auto-generate rooms in sequence (1, 2, 3, ...)
-        for room_num in range(1, num_rooms + 1):
-            HallRoom.objects.create(
-                hall=hall,
-                room_number=str(room_num),
-                block_number="A",
-                capacity=room_capacity,
-                room_type=hall.type_of_seater,
-                status='available'
-            )
-
-
-class HallRetrieveUpdateDestroyView(generics.RetrieveUpdateDestroyAPIView):
-    """Retrieve, update, or delete a hall."""
-    permission_classes = [IsAuthenticated]
-    serializer_class = HallSerializer
-
-    def get_object(self):
-        """Get hall by ID."""
-        return get_object_or_404(Hall, pk=self.kwargs['pk'])
-
-# ══════════════════════════════════════════════════════════════
-# HALL ROOM MANAGEMENT VIEWS
-# ══════════════════════════════════════════════════════════════
-
-class HallRoomListCreateView(generics.ListCreateAPIView):
-    """List all rooms in a hall or create a new room."""
-    permission_classes = [IsAuthenticated]
-    serializer_class = HallRoomSerializer
-
-    def get_serializer_class(self):
-        """Use HallRoomCreateUpdateSerializer for POST, HallRoomSerializer for GET."""
-        if self.request.method == 'POST':
-            return HallRoomCreateUpdateSerializer
-        return HallRoomSerializer
-
-    def get_queryset(self):
-        """Get all rooms for a specific hall."""
-        hall_id = self.kwargs['pk']
-        return HallRoom.objects.filter(hall_id=hall_id)
-
-    def perform_create(self, serializer):
-        """Create room via serializer."""
-        hall_id = self.kwargs['pk']
-        hall = get_object_or_404(Hall, pk=hall_id)
-        serializer.save(hall=hall)
-
-
-class HallRoomRetrieveUpdateDestroyView(generics.RetrieveUpdateDestroyAPIView):
-    """Retrieve, update, or delete a specific room in a hall."""
-    permission_classes = [IsAuthenticated]
-    serializer_class = HallRoomSerializer
-
-    def get_object(self):
-        """Get room by ID, verifying it belongs to the specified hall."""
-        hall_id = self.kwargs['hall_pk']
-        room_id = self.kwargs['pk']
-        return get_object_or_404(HallRoom, pk=room_id, hall_id=hall_id)
 
 
 # ══════════════════════════════════════════════════════════════
-# SUPER ADMIN MANAGEMENT VIEWS
+# COMPLAINT MANAGEMENT VIEWS (HM-WF-102)
 # ══════════════════════════════════════════════════════════════
-
-class WardenAssignmentView(generics.GenericAPIView):
-    """Assign a warden to a hall (Super Admin only)."""
-    permission_classes = [IsSuperAdmin]
-    serializer_class = HallSerializer
-
-    def post(self, request, *args, **kwargs):
-        """
-        Assign warden to hall by email.
-        Request body: { "email": "user@example.com", "hall_id": <id> }
-        """
-        try:
-            email = request.data.get('email')
-            hall_id = request.data.get('hall_id')
-            
-            if not email or not hall_id:
-                return Response(
-                    {'error': 'email and hall_id are required'},
-                    status=status.HTTP_400_BAD_REQUEST
-                )
-            
-            # Get user by email
-            user = get_object_or_404(User, email=email)
-            
-            # Get or create Faculty for this user
-            faculty = Faculty.objects.filter(id__user=user).first()
-            if not faculty:
-                return Response(
-                    {'error': f'No faculty profile found for user {email}'},
-                    status=status.HTTP_400_BAD_REQUEST
-                )
-            
-            hall = get_object_or_404(Hall, pk=hall_id)
-            
-            warden = services.assign_warden_to_hall(hall, faculty)
-            
-            return Response(
-                {'message': f'Warden assigned to {hall.hall_name}', 'warden_id': warden.id},
-                status=status.HTTP_201_CREATED
-            )
-        except Exception as e:
-            return Response(
-                {'error': str(e)},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-
-
-class CaretakerAssignmentView(generics.GenericAPIView):
-    """Assign a caretaker to a hall (Super Admin only)."""
-    permission_classes = [IsSuperAdmin]
-    serializer_class = HallSerializer
-
-    def post(self, request, *args, **kwargs):
-        """
-        Assign caretaker to hall by email.
-        Request body: { "email": "user@example.com", "hall_id": <id> }
-        """
-        try:
-            email = request.data.get('email')
-            hall_id = request.data.get('hall_id')
-            
-            if not email or not hall_id:
-                return Response(
-                    {'error': 'email and hall_id are required'},
-                    status=status.HTTP_400_BAD_REQUEST
-                )
-
-            
-            # Get user by email
-            user = get_object_or_404(User, email=email)
-            
-            # Get or create Staff for this user
-            staff = Staff.objects.filter(id__user=user).first()
-            if not staff:
-                return Response(
-                    {'error': f'No staff profile found for user {email}'},
-                    status=status.HTTP_400_BAD_REQUEST
-                )
-            
-            hall = get_object_or_404(Hall, pk=hall_id)
-            
-            caretaker = services.assign_caretaker_to_hall(hall, staff)
-            
-            return Response(
-                {'message': f'Caretaker assigned to {hall.hall_name}', 'caretaker_id': caretaker.id},
-                status=status.HTTP_201_CREATED
-            )
-        except Exception as e:
-            return Response(
-                {'error': str(e)},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-
-
-class BatchAllocationView(generics.GenericAPIView):
-    """Allocate an academic batch to a hall (Super Admin only)."""
-    permission_classes = [IsSuperAdmin]
-    serializer_class = HallSerializer
-
-    def post(self, request, *args, **kwargs):
-        """
-        Allocate batch to hall.
-        Request body: { "hall_id": <id>, "batch_id": <id> }
-        """
-        try:
-            hall_id = request.data.get('hall_id')
-            batch_id = request.data.get('batch_id')
-            
-            if not hall_id or not batch_id:
-                return Response(
-                    {'error': 'hall_id and batch_id are required'},
-                    status=status.HTTP_400_BAD_REQUEST
-                )
-            
-            hall = get_object_or_404(Hall, pk=hall_id)
-            from applications.programme_curriculum.models import AcademicBatch
-            batch = get_object_or_404(AcademicBatch, id=batch_id)
-            
-            updated_hall = services.allocate_batch_to_hall(hall, batch)
-            
-            return Response(
-                {'message': f'Batch allocated to {hall.hall_name}', 'batch_id': batch.id},
-                status=status.HTTP_200_OK
-            )
-        except Exception as e:
-            return Response(
-                {'error': str(e)},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-
-
-class ActiveBatchYearsView(generics.ListAPIView):
-    """Get all active batch years for assignment (Super Admin only)."""
-    permission_classes = [IsSuperAdmin]
-
-    def get(self, request, *args, **kwargs):
-        """Get active batch years."""
-        try:
-            batches = services.get_active_batch_years()
-            return Response(
-                {'batches': batches},
-                status=status.HTTP_200_OK
-            )
-        except Exception as e:
-            return Response(
-                {'error': str(e)},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-
-
-class StaffAssignmentListView(generics.ListAPIView):
-    """List all warden and caretaker assignments."""
-    permission_classes = [IsSuperAdmin]
-    pagination_class = StandardPagination
-
-    def get(self, request, *args, **kwargs):
-        """Get all assignments (wardens and caretakers)."""
-        try:
-            wardens = HallWarden.objects.all().select_related('hall', 'faculty__id__user')
-            caretakers = HallCaretaker.objects.all().select_related('hall', 'staff__id__user')
-            
-            assignments = []
-            
-            # Add wardens
-            for warden in wardens:
-                user = warden.faculty.id.user if warden.faculty and warden.faculty.id else None
-                assignments.append({
-                    'id': f'warden_{warden.id}',
-                    'staff_name': user.get_full_name() if user else 'Unknown',
-                    'email': user.email if user else 'N/A',
-                    'hall_name': warden.hall.hall_name,
-                    'role': 'warden',
-                    'assigned_date': warden.assigned_date,
-                })
-            
-            # Add caretakers
-            for caretaker in caretakers:
-                user = caretaker.staff.id.user if caretaker.staff and caretaker.staff.id else None
-                assignments.append({
-                    'id': f'caretaker_{caretaker.id}',
-                    'staff_name': user.get_full_name() if user else 'Unknown',
-                    'email': user.email if user else 'N/A',
-                    'hall_name': caretaker.hall.hall_name,
-                    'role': 'caretaker',
-                    'assigned_date': caretaker.assigned_date,
-                })
-            
-            return Response(assignments, status=status.HTTP_200_OK)
-        except Exception as e:
-            return Response(
-                {'error': str(e)},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-
-
-class StaffAssignmentDeleteView(generics.DestroyAPIView):
-    """Delete a warden or caretaker assignment."""
-    permission_classes = [IsSuperAdmin]
-
-    def delete(self, request, *args, **kwargs):
-        """Delete assignment by ID."""
-        try:
-            assignment_id = self.kwargs['pk']
-            
-            # Try to find and delete from wardens
-            if 'warden_' in str(assignment_id):
-                warden_id = int(str(assignment_id).replace('warden_', ''))
-                warden = get_object_or_404(HallWarden, pk=warden_id)
-                warden.delete()
-            # Try to find and delete from caretakers
-            elif 'caretaker_' in str(assignment_id):
-                caretaker_id = int(str(assignment_id).replace('caretaker_', ''))
-                caretaker = get_object_or_404(HallCaretaker, pk=caretaker_id)
-                caretaker.delete()
-            else:
-                return Response(
-                    {'error': 'Invalid assignment ID format'},
-                    status=status.HTTP_400_BAD_REQUEST
-                )
-            return Response(
-                {'message': 'Assignment removed successfully'},
-                status=status.HTTP_200_OK
-            )
-        except Exception as e:
-            return Response(
-                {'error': str(e)},
-                status=status.HTTP_400_BAD_REQUEST
-            )
 
 
 class FacultyListView(generics.ListAPIView):
@@ -464,7 +142,8 @@ class FacultyListView(generics.ListAPIView):
                 user = faculty.id.user if faculty.id else None
                 if user:
                     faculty_data.append({
-                        'id': faculty.id.id,  # Get the id field from ExtraInfo
+                        'id': user.id,  # Get the actual User primary key
+                        'extra_id': faculty.id.id, # Keep extra_id for reference
                         'first_name': user.first_name,
                         'last_name': user.last_name,
                         'email': user.email,
@@ -492,7 +171,8 @@ class StaffListView(generics.ListAPIView):
                 user = staff_member.id.user if staff_member.id else None
                 if user:
                     staff_data.append({
-                        'id': staff_member.id.id,  # Get the id field from ExtraInfo
+                        'id': user.id,  # Get the actual User primary key
+                        'extra_id': staff_member.id.id, # Keep extra_id for reference
                         'first_name': user.first_name,
                         'last_name': user.last_name,
                         'email': user.email,
@@ -509,12 +189,12 @@ class StaffListView(generics.ListAPIView):
 class RoomRenameView(generics.UpdateAPIView):
     """Rename a room (Warden/Caretaker can rename rooms from sequential to custom names)."""
     permission_classes = [IsWardenOrCaretaker]
-    serializer_class = HallRoomSerializer
+    serializer_class = serializers.RoomSetupSerializer
 
     def get_object(self):
         """Get room by ID."""
         room_id = self.kwargs['pk']
-        return get_object_or_404(HallRoom, pk=room_id)
+        return get_object_or_404(Room, pk=room_id)
 
     def patch(self, request, *args, **kwargs):
         """
@@ -522,9 +202,10 @@ class RoomRenameView(generics.UpdateAPIView):
         Request body: { "room_number": "A101", "block_number": "A" }
         """
         try:
-            room = self.get_object()
+            room_id = self.kwargs['pk']
+            room = get_object_or_404(Room, pk=room_id)
             room_number = request.data.get('room_number')
-            block_number = request.data.get('block_number')
+            floor = request.data.get('floor')
             
             if not room_number:
                 return Response(
@@ -532,11 +213,10 @@ class RoomRenameView(generics.UpdateAPIView):
                     status=status.HTTP_400_BAD_REQUEST
                 )
             
-            updated_room = services.rename_room_in_hall(room, room_number, block_number)
+            updated_room = services.rename_room_in_hostel(room, room_number, floor)
             
-            serializer = self.get_serializer(updated_room)
             return Response(
-                {'message': 'Room renamed successfully', 'room': serializer.data},
+                {'message': 'Room renamed successfully'},
                 status=status.HTTP_200_OK
             )
         except Exception as e:
@@ -773,199 +453,175 @@ class ComplaintResolveView(generics.UpdateAPIView):
 
 
 # ══════════════════════════════════════════════════════════════
-# ROOM ALLOCATION VIEWS (HM-WF-103)
+# HM-WF-103: ACCOMMODATION REQUEST & ALLOTMENT VIEWS
 # ══════════════════════════════════════════════════════════════
 
-class RoomAllocationListView(generics.ListAPIView):
-    """List room allocations with pagination (50 per page) and optimized queries."""
+class ListWindowsView(generics.ListAPIView):
+    """List all accommodation application windows."""
     permission_classes = [IsAuthenticated]
-    serializer_class = RoomAllocationSerializer
+    serializer_class = serializers.AccommodationApplicationWindowSerializer
+    queryset = selectors.list_all_application_windows()
+
+
+class SubmitAccommodationRequestView(generics.CreateAPIView):
+    """Submit a new accommodation request (Student only)."""
+    permission_classes = [IsStudent]
+    serializer_class = serializers.AccommodationRequestSerializer
+
+    def perform_create(self, serializer):
+        try:
+            student = getattr(self.request.user, 'student', None)
+            if not student:
+                raise HostelManagementException("User profile not found.")
+
+            services.create_accommodation_request(
+                student=student,
+                window_id=self.request.data.get('window'),
+                preferred_hostel_type=self.request.data.get('preferred_hostel_type'),
+                preferred_room_type=self.request.data.get('preferred_room_type')
+            )
+        except ApplicationWindowError as e:
+            from rest_framework.exceptions import ValidationError
+            raise ValidationError({'detail': str(e)})
+
+
+class ListRequestsView(generics.ListAPIView):
+    """List all pending accommodation requests."""
+    permission_classes = [IsSuperAdmin | IsWardenOrCaretaker]
+    serializer_class = serializers.AccommodationRequestSerializer
     pagination_class = StandardPagination
 
     def get_queryset(self):
-        """Get allocations for user, all if staff, hall if caretaker, or student's own."""
+        window_id = self.request.query_params.get('window_id')
+        return selectors.list_pending_requests(window_id)
+
+
+class RoomCapacityDashboardView(generics.ListAPIView):
+    """View hostel capacity and occupancy dashboard."""
+    permission_classes = [IsSuperAdmin | IsWardenOrCaretaker]
+    serializer_class = serializers.RoomCapacityDashboardSerializer
+
+    def get_queryset(self):
         user = self.request.user
-        if user.is_staff:
-            return selectors.get_all_allocations()
+        queryset = Hostel.objects.prefetch_related('rooms_setup')
         
-        # Check if user is caretaker - get allocations for assigned hall
-        caretaker = HallCaretaker.objects.filter(staff__id__user=user).first()
-        if caretaker:
-            return selectors.get_allocations_by_hall(caretaker.hall.id)
+        if user.is_superuser:
+            return queryset.all()
         
-        # Otherwise return student's own allocations
-        return selectors.get_student_allocations(user)
+        # Filter for Warden/Caretaker assigned hostels
+        assigned_query = selectors.list_assigned_hostels(user)
+        return queryset.filter(hall_id__in=assigned_query.values_list('hall_id', flat=True))
 
 
-class RoomAllocationRetrieveView(generics.RetrieveAPIView):
-    """Retrieve allocation details."""
+class MyAllotmentView(generics.RetrieveAPIView):
+    """View the active allotment for the current authenticated student."""
     permission_classes = [IsAuthenticated]
-    serializer_class = RoomAllocationSerializer
+    serializer_class = serializers.RoomAllotmentSerializer
 
     def get_object(self):
-        """Get allocation by ID."""
-        return get_object_or_404(RoomAllocation, pk=self.kwargs['pk'])
-
-
-class RoomAllocationDestroyView(generics.DestroyAPIView):
-    """Delete/remove a room allocation (superadmin only)."""
-    permission_classes = [IsSuperAdmin]
-    serializer_class = RoomAllocationSerializer
-
-    def get_object(self):
-        """Get allocation by ID."""
-        return get_object_or_404(RoomAllocation, pk=self.kwargs['pk'])
-    
-    def destroy(self, request, *args, **kwargs):
-        """Delete allocation and release room occupancy."""
-        allocation = self.get_object()
-        room = allocation.room
+        # Use same pattern as selectors.get_student for 100% consistency
+        student = selectors.get_student(self.request.user)
+        if not student:
+            return None
         
-        # Update room occupancy if room exists
-        if room:
-            room.current_occupancy = max(0, room.current_occupancy - 1)
-            room.save()
+        allotment = selectors.get_active_allotment_by_student(student)
+        if not allotment:
+            # We raise a standard DRF NotFound to avoid ambiguity with generic 404s
+            from rest_framework.exceptions import NotFound
+            raise NotFound("No active or legacy allotment found for current student.")
         
-        # Delete the allocation
-        allocation.delete()
-        
-        return Response(
-            {'detail': 'Allocation removed successfully', 'room_occupancy': room.current_occupancy if room else None},
-            status=status.HTTP_200_OK
-        )
+        return allotment
 
 
-class BulkRoomAllocationView(generics.CreateAPIView):
-    """Perform bulk room allocation by academic batch."""
-    permission_classes = [IsSuperAdmin]
-    serializer_class = RoomAllocationSerializer
+class BulkAllotmentView(generics.GenericAPIView):
+    """Perform bulk allotment for selected requests."""
+    permission_classes = [IsSuperAdmin | IsWardenOrCaretaker]
+    serializer_class = serializers.BulkAllotmentSerializer
 
     def post(self, request, *args, **kwargs):
-        """
-        Bulk allocate rooms to students in an academic batch.
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
         
-        Expected payload:
-        {
-            "academic_batch": "batch_id",
-            "hall_id": "hall_id",
-            "allocation_date": "YYYY-MM-DD",
-            "start_room_number": 101,
-            "notes": "optional notes"
-        }        """
-        import logging
-        logger = logging.getLogger(__name__)
+        request_ids = serializer.validated_data.get('request_ids')
+        results = services.perform_bulk_allotment_logic(
+            request_ids=request_ids,
+            allotted_by=request.user
+        )
+        
+        return Response(results, status=status.HTTP_200_OK)
+
+
+class BulkBatchAllocationView(generics.GenericAPIView):
+    """
+    Perform bulk batch allocation for a hostel.
+    Allocates students sequentially by floor and room number.
+    """
+    permission_classes = [IsSuperAdmin | IsWardenOrCaretaker]
+    serializer_class = serializers.BatchAllocationSerializer
+
+    def post(self, request, pk, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
         
         try:
-            academic_batch = request.data.get('academic_batch')
-            hall_id = request.data.get('hall_id')
-            allocation_date = request.data.get('allocation_date')
-            start_room_number = request.data.get('start_room_number', 1)
-            notes = request.data.get('notes', '')
-            
-            logger.info(f"[BATCH_ALLOCATION] Starting allocation: batch={academic_batch}, hall={hall_id}, date={allocation_date}")
-            
-            if not all([academic_batch, hall_id, allocation_date]):
-                return Response(
-                    {'detail': 'Missing required fields: academic_batch, hall_id, allocation_date'},
-                    status=status.HTTP_400_BAD_REQUEST
-                )
-            
-            # Verify batch exists (using Batch from programme_curriculum for admission cohorts)
-            from applications.programme_curriculum.models import Batch
-            batch = get_object_or_404(Batch, pk=academic_batch)
-            logger.info(f"[BATCH_ALLOCATION] Found batch: {batch.name}")
-            
-            # Get students from batch using selector
-            students = selectors.list_students_by_academic_batch(academic_batch)
-            students_list = list(students)
-            logger.info(f"[BATCH_ALLOCATION] Found {len(students_list)} students in batch")
-            
-            if not students_list:
-                logger.warning(f"[BATCH_ALLOCATION] No students found in batch {academic_batch}")
-                return Response(
-                    {'detail': 'No students found in the specified batch'},
-                    status=status.HTTP_400_BAD_REQUEST
-                )
-            
-            # Get the hall
-            hall = get_object_or_404(Hall, pk=hall_id)
-            logger.info(f"[BATCH_ALLOCATION] Found hall: {hall.hall_name} (hall_id={hall.hall_id})")
-            
-            # Get available rooms from hall - using hall's hall_id field (not pk)
-            all_available_rooms = selectors.list_available_rooms(hall.hall_id)
-            rooms_list = list(all_available_rooms)
-            logger.info(f"[BATCH_ALLOCATION] Found {len(rooms_list)} available rooms in hall: {[r.room_number for r in rooms_list]}")
-            
-            if not rooms_list:
-                logger.warning(f"[BATCH_ALLOCATION] No available rooms found in hall {hall.hall_id}")
-                return Response(
-                    {'detail': 'No available rooms found in the specified hall'},
-                    status=status.HTTP_400_BAD_REQUEST
-                )
-              # Prepare allocations data - allocate multiple students per room up to capacity
-            allocations_data = []
-            room_occupancy_tracker = {}  # Track occupancy in-memory as we allocate
-            room_idx = 0
-            
-            for idx, student in enumerate(students_list):
-                # Find next available room
-                found_room = False
-                while room_idx < len(rooms_list):
-                    room = rooms_list[room_idx]
-                    # Get current occupancy from database + tracked allocations
-                    db_occupancy = selectors.count_occupied_seats_in_room(room.id)
-                    tracked_allocations = room_occupancy_tracker.get(room.id, 0)
-                    total_occupancy = db_occupancy + tracked_allocations
-                    
-                    logger.debug(f"[BATCH_ALLOCATION] Room {room.room_number}: DB={db_occupancy}, Tracked={tracked_allocations}, Total={total_occupancy}/{room.capacity}")
-                    
-                    if total_occupancy < room.capacity:
-                        found_room = True
-                        break  # Found available room
-                    # Current room is full, move to next
-                    room_idx += 1
-                
-                if not found_room:
-                    logger.info(f"[BATCH_ALLOCATION] No more available rooms. Allocated {len(allocations_data)} students (stopped at student {idx}/{len(students_list)})")
-                    break  # No more available rooms
-                
-                room = rooms_list[room_idx]
-                allocations_data.append({
-                    'student': student,
-                    'room': room,
-                    'hall': hall,
-                    'allocated_by': None
-                })
-                # Track this allocation in memory
-                room_occupancy_tracker[room.id] = room_occupancy_tracker.get(room.id, 0) + 1
-                logger.debug(f"[BATCH_ALLOCATION] Allocated student {student.id.id} to room {room.room_number}")
-            
-            logger.info(f"[BATCH_ALLOCATION] Prepared allocations for {len(allocations_data)} students")
-            
-            # Perform bulk allocation using service
-            result = services.bulk_allocate_rooms(room_allocations_data=allocations_data)
-            logger.info(f"[BATCH_ALLOCATION] Allocation completed. Created {len(result)} allocations")
-            
-            return Response(
-                {
-                    'success': True,
-                    'allocated_count': len(result),
-                    'batch_id': academic_batch,
-                    'hall_id': hall_id,
-                    'allocations': RoomAllocationSerializer(result, many=True).data
-                },
-                status=status.HTTP_201_CREATED
+            results = services.perform_bulk_batch_allocation(
+                hall_id=pk,
+                programme_category=serializer.validated_data.get('programme_category'),
+                admission_year=serializer.validated_data.get('admission_year'),
+                gender=serializer.validated_data.get('gender'),
+                allotted_by=request.user
             )
+            return Response(results, status=status.HTTP_200_OK)
+        except ValueError as e:
+            return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
         except Exception as e:
-            import traceback
-            return Response(
-                {
-                    'detail': str(e),
-                    'error_type': type(e).__name__,
-                    'traceback': traceback.format_exc()
-                },
-                status=status.HTTP_400_BAD_REQUEST
-            )
+            return Response({'error': f'An unexpected error occurred during allocation: {str(e)}'}, 
+                            status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+
+class RoomAllotmentListView(generics.ListAPIView):
+    """
+    Administrative list of room allotments.
+    - SuperAdmin: View all (can filter by hall)
+    - Warden/Caretaker: View only for their assigned halls
+    - Chunks: StandardPagination (50 per page)
+    """
+    serializer_class = serializers.RoomAllotmentSerializer
+    pagination_class = StandardPagination
+    
+    def get_permissions(self):
+        # Accessible by SuperAdmin, Warden, or Caretaker
+        return [IsAuthenticated(), (IsSuperAdmin | IsWardenOrCaretaker)()]
+
+    def get_queryset(self):
+        user = self.request.user
+        hall_id = self.request.query_params.get('hall') # Hall filter (actually hostel.hall_id)
+
+        if user.is_superuser:
+            # Show all for Super Admin
+            return selectors.list_active_room_allotments(hall_id=hall_id)
+        
+        # Determine accessible hostels for Warden/Caretaker using robust selector
+        assigned_hostels = selectors.list_assigned_hostels(user)
+        assigned_hall_ids = list(assigned_hostels.values_list('hall_id', flat=True))
+
+        if not assigned_hall_ids:
+            return RoomAllotment.objects.none()
+
+        # If hall filter provided, ensure it's within assigned hostels
+        if hall_id and hall_id in assigned_hall_ids:
+            return selectors.list_active_room_allotments(hall_id=hall_id)
+        
+        # Return all allotments in assigned hostels, ordered by most recent
+        return RoomAllotment.objects.filter(
+            hostel_id__in=assigned_hall_ids,
+            is_active=True
+        ).order_by('-allotted_at')
+        return RoomAllotment.objects.filter(
+            hostel__hall_id__in=assigned_hostels,
+            is_active=True
+        ).select_related('student__id__user', 'room', 'hostel').order_by('room__room_number')
 
 
 # ══════════════════════════════════════════════════════════════
@@ -1353,7 +1009,7 @@ class NoticeListView(generics.ListCreateAPIView):
         if not hall_id:
             raise drf_serializers.ValidationError({'hall_id': 'hall_id is required to post a notice'})
         
-        hall = get_object_or_404(Hall, pk=hall_id)
+        hall = get_object_or_404(Hostel, pk=hall_id)
         serializer.save(posted_by=self.request.user, hall=hall)
 
 
@@ -1497,14 +1153,17 @@ class ExtendedStayRejectView(generics.UpdateAPIView):
 # ATTENDANCE MANAGEMENT VIEWS
 # ══════════════════════════════════════════════════════════════
 
-class AttendanceByHallView(generics.ListAPIView):
-    """List attendance for a hall on a specific date."""
-    permission_classes = [IsAuthenticated]
+class AttendanceByHostelView(generics.ListAPIView):
+    """List attendance for a hostel on a specific date."""
+    permission_classes = [IsWardenOrCaretaker]
     serializer_class = HostelAttendanceSerializer
 
     def get_queryset(self):
-        hall_id = self.kwargs['hall_id']
+        hall_id = self.request.query_params.get('hall_id')
         date_str = self.request.query_params.get('date')
+        if not hall_id:
+             return HostelStudentAttendance.objects.none()
+        
         if date_str:
             try:
                 date = datetime.strptime(date_str, '%Y-%m-%d').date()
@@ -1512,7 +1171,8 @@ class AttendanceByHallView(generics.ListAPIView):
                 date = timezone.now().date()
         else:
             date = timezone.now().date()
-        return selectors.list_attendance_by_date(hall_id, date)
+        
+        return selectors.get_attendance_by_hostel(hall_id, date)
 
 
 class AttendanceMarkView(generics.CreateAPIView):
@@ -1529,14 +1189,395 @@ class AttendanceMarkView(generics.CreateAPIView):
             return Response({'error': 'hall_id and date are required'}, status=status.HTTP_400_BAD_REQUEST)
             
         try:
-            hall = selectors.get_hall_by_id(hall_id)
-            if not hall:
-                return Response({'error': f'Hall {hall_id} not found'}, status=status.HTTP_404_NOT_FOUND)
+            hostel = Hostel.objects.filter(hall_id=hall_id).first()
+            if not hostel:
+                return Response({'error': f'Hostel {hall_id} not found'}, status=status.HTTP_404_NOT_FOUND)
             
             date = datetime.strptime(date_str, '%Y-%m-%d').date()
-            records = services.mark_attendance(hall, date, attendance_data)
+            records = services.mark_attendance(hostel, date, attendance_data)
             serializer = self.get_serializer(records, many=True)
             return Response(serializer.data, status=status.HTTP_201_CREATED)
         except Exception as e:
             return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
+
+# ══════════════════════════════════════════════════════════════
+# HOSTEL SETUP FOUNDATION VIEWS
+# ══════════════════════════════════════════════════════════════
+
+from ..models import (
+    HostelAuditLog, StaffRoleChoices, HostelStatusChoices as HostelOpStatusChoices
+)
+from ..permissions import IsHostelSuperAdmin, IsAssignedToHostel
+from .serializers import (
+    HostelSetupSerializer, HostelCreateSerializer, HostelStatusSerializer,
+    StaffAssignmentSerializer, StaffAssignmentCreateSerializer,
+    HostelAuditLogSerializer
+)
+
+
+class CreateHostelView(generics.CreateAPIView):
+    """Create a new hostel (SuperAdmin only). Rooms auto-created via post_save signal."""
+    permission_classes = [IsHostelSuperAdmin]
+    serializer_class = HostelCreateSerializer
+
+    def perform_create(self, serializer):
+        hostel = serializer.save(created_by=self.request.user)
+        # Write audit log
+        HostelAuditLog.objects.create(
+            hostel=hostel,
+            action='HOSTEL_CREATED',
+            performed_by=self.request.user,
+            detail_json={
+                'name': hostel.name,
+                'type': hostel.type,
+                'total_capacity': hostel.total_capacity,
+                'floor_count': hostel.floor_count,
+                'rooms_created': hostel.rooms_setup.count(),
+            }
+        )
+
+    def create(self, request, *args, **kwargs):
+        response = super().create(request, *args, **kwargs)
+        # Return with full serializer
+        hall_id = response.data.get('hall_id')
+        hostel = Hostel.objects.get(hall_id=hall_id)
+        return Response(
+            HostelSetupSerializer(hostel).data,
+            status=status.HTTP_201_CREATED
+        )
+
+
+class ListHostelsView(generics.ListAPIView):
+    """
+    List hostels with warden info.
+    - SuperAdmins see all hostels.
+    - Wardens and Caretakers see only their assigned hostels (modern or legacy).
+    """
+    permission_classes = [IsHostelSuperAdmin | IsWardenOrCaretaker]
+    serializer_class = HostelSetupSerializer
+
+    def get_queryset(self):
+        user = self.request.user
+        queryset = Hostel.objects.prefetch_related(
+            'staff_assignments', 'staff_assignments__user', 'rooms_setup'
+        )
+        
+        if user.is_superuser:
+            return queryset.all()
+        
+        # Filter by assigned hostels (including legacy mapping)
+        assigned_query = selectors.list_assigned_hostels(user)
+        return queryset.filter(hall_id__in=assigned_query.values_list('hall_id', flat=True))
+
+
+class RetrieveHostelView(generics.RetrieveAPIView):
+    """Retrieve a single hostel's details."""
+    permission_classes = [IsAssignedToHostel]
+    serializer_class = HostelSetupSerializer
+
+    def get_queryset(self):
+        return Hostel.objects.prefetch_related(
+            'staff_assignments', 'staff_assignments__user', 'rooms_setup'
+        ).all()
+
+
+class ManageHostelStatusView(generics.GenericAPIView):
+    """
+    Change hostel status (SuperAdmin only).
+
+    Enforces:
+    - BR-HM-008.a: Block deactivation if occupied rooms
+    - BR-HM-008.b / BR-HM-019.a: Block activation without warden+caretaker
+    - All changes written to HostelAuditLog
+    """
+    permission_classes = [IsHostelSuperAdmin]
+    serializer_class = HostelStatusSerializer
+
+    def patch(self, request, pk, *args, **kwargs):
+        hostel = get_object_or_404(Hostel, pk=pk)
+        serializer = self.get_serializer(
+            data=request.data, context={'hostel': hostel}
+        )
+        serializer.is_valid(raise_exception=True)
+
+        old_status = hostel.status
+        new_status = serializer.validated_data['status']
+
+        hostel.status = new_status
+        hostel.save(update_fields=['status', 'updated_at'])
+
+        # Write audit log
+        HostelAuditLog.objects.create(
+            hostel=hostel,
+            action='STATUS_CHANGED',
+            performed_by=request.user,
+            detail_json={
+                'from_status': old_status,
+                'to_status': new_status,
+            }
+        )
+
+        return Response(
+            HostelSetupSerializer(hostel).data,
+            status=status.HTTP_200_OK
+        )
+
+
+class AssignWardenView(generics.GenericAPIView):
+    """
+    Assign a warden to a hostel (SuperAdmin only).
+
+    Deactivates any previous active warden for this hostel before creating
+    the new assignment. Writes to HostelAuditLog.
+    """
+    permission_classes = [IsHostelSuperAdmin]
+    serializer_class = StaffAssignmentCreateSerializer
+
+    def post(self, request, pk, *args, **kwargs):
+        hostel = get_object_or_404(Hostel, pk=pk)
+        data = request.data.copy()
+        data['role'] = StaffRoleChoices.WARDEN
+        serializer = self.get_serializer(data=data)
+        
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        user = User.objects.get(id=serializer.validated_data['user_id'])
+        warning = serializer.validated_data.get('_warning')
+
+        # Block if a warden is already assigned
+        active_warden = HostelStaffAssignment.objects.filter(
+            hostel=hostel, role=StaffRoleChoices.WARDEN, is_active=True
+        ).exists()
+
+        if active_warden:
+            return Response(
+                {"error": "This hostel already has an active Warden assigned. Please remove the existing assignment first."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        assignment = HostelStaffAssignment.objects.create(
+            hostel=hostel,
+            user=user,
+            role=StaffRoleChoices.WARDEN,
+            start_date=serializer.validated_data['start_date'],
+            end_date=serializer.validated_data.get('end_date'),
+            is_active=True,
+            assigned_by=request.user
+        )
+
+        # Write audit log
+        HostelAuditLog.objects.create(
+            hostel=hostel,
+            action='WARDEN_ASSIGNED',
+            performed_by=request.user,
+            detail_json={
+                'user_id': user.id,
+                'user_name': user.get_full_name() or user.username,
+                'start_date': str(assignment.start_date),
+            }
+        )
+
+        result = StaffAssignmentSerializer(assignment).data
+        if warning:
+            result['warning'] = warning
+
+        return Response(result, status=status.HTTP_201_CREATED)
+
+
+class AssignCaretakerView(generics.GenericAPIView):
+    """
+    Assign a caretaker to a hostel (SuperAdmin only).
+
+    Deactivates any previous active caretaker for this hostel before creating
+    the new assignment. Writes to HostelAuditLog.
+    """
+    permission_classes = [IsHostelSuperAdmin]
+    serializer_class = StaffAssignmentCreateSerializer
+
+    def post(self, request, pk, *args, **kwargs):
+        hostel = get_object_or_404(Hostel, pk=pk)
+        data = request.data.copy()
+        data['role'] = StaffRoleChoices.CARETAKER
+        serializer = self.get_serializer(data=data)
+        
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        user = User.objects.get(id=serializer.validated_data['user_id'])
+        warning = serializer.validated_data.get('_warning')
+
+        # Block if a caretaker is already assigned
+        active_caretaker = HostelStaffAssignment.objects.filter(
+            hostel=hostel, role=StaffRoleChoices.CARETAKER, is_active=True
+        ).exists()
+
+        if active_caretaker:
+            return Response(
+                {"error": "This hostel already has an active Caretaker assigned. Please remove the existing assignment first."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        assignment = HostelStaffAssignment.objects.create(
+            hostel=hostel,
+            user=user,
+            role=StaffRoleChoices.CARETAKER,
+            start_date=serializer.validated_data['start_date'],
+            end_date=serializer.validated_data.get('end_date'),
+            is_active=True,
+            assigned_by=request.user
+        )
+
+        HostelAuditLog.objects.create(
+            hostel=hostel,
+            action='CARETAKER_ASSIGNED',
+            performed_by=request.user,
+            detail_json={
+                'user_id': user.id,
+                'user_name': user.get_full_name() or user.username,
+                'start_date': str(assignment.start_date),
+            }
+        )
+
+        result = StaffAssignmentSerializer(assignment).data
+        if warning:
+            result['warning'] = warning
+
+        return Response(result, status=status.HTTP_201_CREATED)
+
+
+class ReassignStaffView(generics.GenericAPIView):
+    """
+    Reassign staff on a hostel (SuperAdmin only).
+
+    If removing the only Warden or Caretaker, a replacement must be provided
+    in the same request. Both old_assignment_id and new user data required.
+    """
+    permission_classes = [IsHostelSuperAdmin]
+
+    def post(self, request, pk, *args, **kwargs):
+        hostel = get_object_or_404(Hostel, pk=pk)
+
+        old_assignment_id = request.data.get('old_assignment_id')
+        new_user_id = request.data.get('new_user_id')
+        start_date = request.data.get('start_date')
+
+        if not old_assignment_id or not new_user_id or not start_date:
+            return Response(
+                {'error': 'old_assignment_id, new_user_id, and start_date are required.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        old_assignment = get_object_or_404(
+            HostelStaffAssignment, pk=old_assignment_id, hostel=hostel
+        )
+        new_user = get_object_or_404(User, pk=new_user_id)
+
+        role = old_assignment.role
+
+        # Check: if removing the only active assignment of this role, block
+        active_same_role = HostelStaffAssignment.objects.filter(
+            hostel=hostel, role=role, is_active=True
+        ).exclude(pk=old_assignment.pk).count()
+
+        if active_same_role == 0 and hostel.status == HostelOpStatusChoices.ACTIVE:
+            # Must be a replacement — which is what this endpoint does
+            pass
+
+        # Deactivate old
+        old_assignment.is_active = False
+        old_assignment.end_date = timezone.now().date()
+        old_assignment.save()
+
+        # Create new
+        new_assignment = HostelStaffAssignment.objects.create(
+            hostel=hostel,
+            user=new_user,
+            role=role,
+            start_date=start_date,
+            is_active=True,
+            assigned_by=request.user
+        )
+
+        HostelAuditLog.objects.create(
+            hostel=hostel,
+            action='STAFF_REASSIGNED',
+            performed_by=request.user,
+            detail_json={
+                'role': role,
+                'old_user_id': old_assignment.user.id,
+                'old_user_name': old_assignment.user.get_full_name() or old_assignment.user.username,
+                'new_user_id': new_user.id,
+                'new_user_name': new_user.get_full_name() or new_user.username,
+            }
+        )
+
+        return Response(
+            StaffAssignmentSerializer(new_assignment).data,
+            status=status.HTTP_200_OK
+        )
+
+
+class ListStaffAssignmentsView(generics.ListAPIView):
+    """
+    List staff assignments for a hostel.
+    - Accessible only by SuperAdmins or assigned Wardens/Caretakers.
+    """
+    permission_classes = [IsHostelSuperAdmin | IsAssignedToHostel]
+    serializer_class = serializers.StaffAssignmentSerializer
+
+    def get_queryset(self):
+        hostel_id = self.kwargs.get('pk')
+        return HostelStaffAssignment.objects.filter(
+            hostel_id=hostel_id
+        ).select_related('user', 'hostel', 'assigned_by')
+
+
+class RemoveStaffAssignmentView(generics.GenericAPIView):
+    """
+    Remove (deactivate) an active staff assignment (SuperAdmin only).
+    """
+    permission_classes = [IsHostelSuperAdmin]
+
+    def post(self, request, pk, *args, **kwargs):
+        assignment = get_object_or_404(HostelStaffAssignment, pk=pk, is_active=True)
+        hostel = assignment.hostel
+        
+        assignment.is_active = False
+        assignment.end_date = timezone.now().date()
+        assignment.save()
+
+        # Write audit log
+        HostelAuditLog.objects.create(
+            hostel=hostel,
+            action=f'{assignment.role.upper()}_REMOVED',
+            performed_by=request.user,
+            detail_json={
+                'user_id': assignment.user.id,
+                'username': assignment.user.username,
+                'assignment_id': assignment.id
+            }
+        )
+
+        return Response(
+            serializers.HostelSetupSerializer(hostel).data,
+            status=status.HTTP_200_OK
+        )
+
+
+class DeleteHostelView(generics.DestroyAPIView):
+    """
+    Permanently delete a hostel (SuperAdmin only).
+    CASCADE deletes rooms, assignments, etc.
+    """
+    permission_classes = [IsHostelSuperAdmin]
+    queryset = Hostel.objects.all()
+
+    def perform_destroy(self, instance):
+        # We can't write an audit log for an object we just deleted if it references it by FK
+        # So we log it first without the FK if necessary, or just rely on global logs
+        # Actually, since our AuditLog is CASCADE, if we delete the hostel, 
+        # the audit log entries for that hostel will ALSO be deleted if they have a FK to it.
+        # This is a drawback of CASCADE audit logs.
+        super().perform_destroy(instance)

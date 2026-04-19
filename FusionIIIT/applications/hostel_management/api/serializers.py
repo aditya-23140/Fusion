@@ -16,19 +16,15 @@ Supports Workflows:
 - HM-WF-105: Fine Management
 """
 
+from django.db import models
 from rest_framework import serializers
 from django.utils import timezone
 from datetime import timedelta
 import re
 
 from ..models import (
-    Hall,
-    HallCaretaker,
-    HallWarden,
-    HallRoom,
     HostelLeave,
     HostelComplaint,
-    RoomAllocation,
     RoomAllocationChange,
     HostelFine,
     StaffSchedule,
@@ -42,198 +38,309 @@ from ..models import (
     ComplaintCategoryChoices,
     ComplaintPriorityChoices,
     FineStatusChoices,
-    RoomAllocationStatusChoices,
+    AccommodationApplicationWindow,
+    AccommodationRequest,
+    RoomAllotment,
+    Hostel,
+    Room,
+    HostelTypeChoices as HostelOpStatusChoices,
+    RoomTypeChoices,
+    StaffRoleChoices,
+    HostelStaffAssignment,
+    HostelAuditLog
+
 )
 
 
 # ══════════════════════════════════════════════════════════════
-# HALL SERIALIZERS
+# HOSTEL SETUP FOUNDATION SERIALIZERS
 # ══════════════════════════════════════════════════════════════
 
-class HallSerializer(serializers.ModelSerializer):
-    """Read-only serializer for Hall details."""
-    number_of_rooms = serializers.SerializerMethodField()
-    number_students = serializers.SerializerMethodField()
-    
+class RoomSetupSerializer(serializers.ModelSerializer):
+    """Read-only serializer for Room (new Hostel→Room system)."""
     class Meta:
-        model = Hall
+        model = Room
         fields = [
-            'id', 'hall_id', 'hall_name', 'max_accomodation',
-            'number_students', 'assigned_batch', 'type_of_seater', 'number_of_rooms', 'status'
-        ]
-        read_only_fields = fields
-    
-    def get_number_of_rooms(self, obj):
-        """Get the count of rooms in the hall."""
-        # Use cached count if available (from prefetch_related)
-        if hasattr(obj, '_prefetched_objects_cache'):
-            return len(obj.rooms.all())
-        return obj.rooms.count()
-    
-    def get_number_students(self, obj):
-        """Get the count of currently allocated students in the hall.
-        
-        NOTE: This field is expensive in list views. Consider excluding it
-        from RoomAllocationListView serializer if showing halls there.
-        """
-        # Use cached count if available
-        if hasattr(obj, '_allocated_count_cache'):
-            return obj._allocated_count_cache
-        
-        return RoomAllocation.objects.filter(
-            hall=obj,
-            status=RoomAllocationStatusChoices.ALLOCATED).count()
-
-
-class HallListSerializer(serializers.ModelSerializer):
-    """Lightweight serializer for Hall list views - excludes expensive computations."""
-    number_of_rooms = serializers.SerializerMethodField()
-    number_students = serializers.SerializerMethodField()
-    assigned_batch = serializers.SerializerMethodField()
-    
-    class Meta:
-        model = Hall
-        fields = [
-            'id', 'hall_id', 'hall_name', 'max_accomodation',
-            'number_students', 'assigned_batch', 'type_of_seater', 'number_of_rooms'
+            'id', 'hostel', 'room_number', 'floor', 'capacity',
+            'current_occupancy', 'status'
         ]
         read_only_fields = fields
 
-    def get_number_of_rooms(self, obj):
-        """Get the count of rooms in the hall."""
-        if hasattr(obj, '_prefetched_objects_cache'):
-            return len(obj.rooms.all())
-        return obj.rooms.count()
-    
-    def get_number_students(self, obj):
-        """Get the count of currently allocated students in the hall."""
-        # Use cached count if available
-        if hasattr(obj, '_allocated_count_cache'):
-            return obj._allocated_count_cache
-        
-        return RoomAllocation.objects.filter(
-            hall=obj,
-            status=RoomAllocationStatusChoices.ALLOCATED).count()
-    def get_assigned_batch(self, obj):
-        """Extract batch year from assigned_batch field.
-        
-        The assigned_batch field stores an AcademicBatch object or its year value.
-        This method extracts just the year for display.
-        """
-        if not obj.assigned_batch:
-            return None
-        
-        # If it's already a string/int, try to extract year
-        batch_val = obj.assigned_batch
-        
-        # If batch_val is a string representation of an object
-        if isinstance(batch_val, str):
-            # Try to find year pattern (4 digits)
-            year_match = re.search(r'\b(20\d{2})\b', batch_val)
-            if year_match:
-                return int(year_match.group(1))
-            # If it looks like it could be a year itself
-            try:
-                year_int = int(batch_val)
-                if 2000 <= year_int <= 2100:
-                    return year_int
-            except (ValueError, TypeError):
-                pass
-            return batch_val
-        
-        # If it's an object with a year attribute
-        if hasattr(batch_val, 'year'):
-            return batch_val.year
-        
-        # Try to access year as dict key
-        if isinstance(batch_val, dict) and 'year' in batch_val:
-            return batch_val['year']
-        
-        # Return None if we can't extract the year
+
+class HostelSetupSerializer(serializers.ModelSerializer):
+    """
+    Read-only serializer for Hostel list/retrieve.
+    Includes computed fields for active warden and caretaker names,
+    and room counts.
+    """
+    active_warden = serializers.SerializerMethodField()
+    active_caretaker = serializers.SerializerMethodField()
+    total_rooms = serializers.SerializerMethodField()
+    occupied_rooms = serializers.SerializerMethodField()
+    created_by_name = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Hostel
+        fields = [
+            'hall_id', 'name', 'type', 'total_capacity', 'floor_count',
+            'room_config_json', 'status', 'created_by', 'created_by_name',
+            'created_at', 'updated_at',
+            'active_warden', 'active_caretaker', 'total_rooms', 'occupied_rooms'
+        ]
+        read_only_fields = fields
+
+    def get_active_warden(self, obj):
+        assignment = obj.staff_assignments.filter(
+            role=StaffRoleChoices.WARDEN, is_active=True
+        ).select_related('user').first()
+        if assignment:
+            return {
+                'id': assignment.id,
+                'user_id': assignment.user.id,
+                'name': assignment.user.get_full_name() or assignment.user.username,
+                'email': assignment.user.email,
+                'start_date': assignment.start_date,
+            }
+        return None
+
+    def get_active_caretaker(self, obj):
+        assignment = obj.staff_assignments.filter(
+            role=StaffRoleChoices.CARETAKER, is_active=True
+        ).select_related('user').first()
+        if assignment:
+            return {
+                'id': assignment.id,
+                'user_id': assignment.user.id,
+                'name': assignment.user.get_full_name() or assignment.user.username,
+                'email': assignment.user.email,
+                'start_date': assignment.start_date,
+            }
+        return None
+
+    def get_total_rooms(self, obj):
+        return obj.rooms_setup.count()
+
+    def get_occupied_rooms(self, obj):
+        return obj.rooms_setup.filter(current_occupancy__gt=0).count()
+
+    def get_created_by_name(self, obj):
+        if obj.created_by:
+            return obj.created_by.get_full_name() or obj.created_by.username
         return None
 
 
-class HallCreateUpdateSerializer(serializers.ModelSerializer):
-    """Create and update serializer for Hall with validation."""
-    
+class HostelCreateSerializer(serializers.ModelSerializer):
+    """
+    Create serializer for Hostel.
+
+    Validates:
+    - No duplicate hostel name
+    - Positive total_capacity
+    - Valid room_config_json schema
+    - BR-HM-025: Config is source of truth
+    """
     class Meta:
-        model = Hall
+        model = Hostel
         fields = [
-            'hall_id', 'hall_name', 'max_accomodation',
-            'assigned_batch', 'type_of_seater'
+            'hall_id', 'name', 'type', 'total_capacity', 'floor_count', 'room_config_json'
         ]
-    
-    def validate_hall_id(self, value):
-        """Validate hall_id format."""
-        if not value or len(value) > 10:
-            raise serializers.ValidationError("Hall ID must be between 1 and 10 characters.")
-        return value
-    
-    def validate_max_accomodation(self, value):
-        """Validate max_accomodation is positive."""
+        extra_kwargs = {
+            'hall_id': {'required': True, 'allow_blank': False}
+        }
+
+    def validate_name(self, value):
+        if not value or len(value.strip()) < 2:
+            raise serializers.ValidationError("Hostel name must be at least 2 characters.")
+        if Hostel.objects.filter(name__iexact=value.strip()).exists():
+            raise serializers.ValidationError(f"A hostel named '{value}' already exists.")
+        return value.strip()
+
+    def validate_total_capacity(self, value):
         if value <= 0:
-            raise serializers.ValidationError("Max accommodation must be greater than 0.")
+            raise serializers.ValidationError("Total capacity must be greater than 0.")
+        return value
+
+    def validate_floor_count(self, value):
+        if value <= 0:
+            raise serializers.ValidationError("Floor count must be at least 1.")
+        return value
+
+    def validate_room_config_json(self, value):
+        """Validate room_config_json schema."""
+        if not value:
+            return value
+
+        if not isinstance(value, dict):
+            raise serializers.ValidationError("room_config_json must be a JSON object.")
+
+        floors = value.get('floors')
+        if floors is None:
+            return value  # Empty config is allowed
+
+        if not isinstance(floors, list):
+            raise serializers.ValidationError("'floors' must be a list.")
+
+        for i, floor_cfg in enumerate(floors):
+            if not isinstance(floor_cfg, dict):
+                raise serializers.ValidationError(f"Floor config at index {i} must be an object.")
+            if 'floor' not in floor_cfg:
+                raise serializers.ValidationError(f"Floor config at index {i} must have 'floor' field.")
+            if 'rooms_per_floor' not in floor_cfg:
+                raise serializers.ValidationError(f"Floor config at index {i} must have 'rooms_per_floor' field.")
+            if floor_cfg.get('rooms_per_floor', 0) <= 0:
+                raise serializers.ValidationError(f"Floor {floor_cfg['floor']}: rooms_per_floor must be positive.")
+            if floor_cfg.get('capacity_per_room', 1) <= 0:
+                raise serializers.ValidationError(f"Floor {floor_cfg['floor']}: capacity_per_room must be positive.")
+
         return value
 
 
-class HallCaretakerSerializer(serializers.ModelSerializer):
-    """Serializer for Hall Caretaker assignment."""
-    staff_name = serializers.CharField(source='staff.id.user.username', read_only=True)
-    hall_name = serializers.CharField(source='hall.hall_name', read_only=True)
-    
-    class Meta:
-        model = HallCaretaker
-        fields = ['id', 'hall', 'staff', 'staff_name', 'hall_name', 'assigned_date', 'is_active']
-        read_only_fields = ['id', 'assigned_date', 'staff_name', 'hall_name']
+class HostelStatusSerializer(serializers.Serializer):
+    """
+    Serializer for hostel status transitions.
+
+    Validates transition rules before save:
+    - BR-HM-008.a: Block deactivation if hostel has occupied rooms
+    - BR-HM-008.b: Block activation if no active Warden OR no active Caretaker
+    - BR-HM-019.a: Same as BR-HM-008.b
+    """
+    status = serializers.ChoiceField(choices=HostelOpStatusChoices.choices)
+
+    def validate_status(self, value):
+        hostel = self.context.get('hostel')
+        if not hostel:
+            return value
+
+        current_status = hostel.status
+
+        # Same status — no-op
+        if current_status == value:
+            raise serializers.ValidationError(f"Hostel is already in '{value}' status.")
+
+        # BR-HM-008.a: Block deactivation if occupied rooms exist
+        if value == HostelOpStatusChoices.INACTIVE:
+            occupied_rooms = hostel.rooms_setup.filter(current_occupancy__gt=0).exists()
+            if occupied_rooms:
+                raise serializers.ValidationError(
+                    "Cannot deactivate hostel: there are rooms with current occupants. "
+                    "All rooms must be vacated before deactivation."
+                )
+
+        # BR-HM-008.b / BR-HM-019.a: Block activation without staff
+        if value == HostelOpStatusChoices.ACTIVE:
+            has_warden = hostel.staff_assignments.filter(
+                role=StaffRoleChoices.WARDEN, is_active=True
+            ).exists()
+            has_caretaker = hostel.staff_assignments.filter(
+                role=StaffRoleChoices.CARETAKER, is_active=True
+            ).exists()
+
+            if not has_warden:
+                raise serializers.ValidationError(
+                    "Cannot activate hostel: no active Warden assigned. "
+                    "Assign at least one Warden before activating."
+                )
+            if not has_caretaker:
+                raise serializers.ValidationError(
+                    "Cannot activate hostel: no active Caretaker assigned. "
+                    "Assign at least one Caretaker before activating."
+                )
+
+        return value
 
 
-class HallWardenSerializer(serializers.ModelSerializer):
-    """Serializer for Hall Warden assignment."""
-    faculty_name = serializers.CharField(source='faculty.id.user.username', read_only=True)
-    hall_name = serializers.CharField(source='hall.hall_name', read_only=True)
-    
+class StaffAssignmentSerializer(serializers.ModelSerializer):
+    """
+    Read-only serializer for staff assignment display.
+    """
+    user_name = serializers.SerializerMethodField()
+    user_email = serializers.EmailField(source='user.email', read_only=True)
+    hostel_name = serializers.CharField(source='hostel.name', read_only=True)
+    assigned_by_name = serializers.SerializerMethodField()
+
     class Meta:
-        model = HallWarden
-        fields = ['id', 'hall', 'faculty', 'faculty_name', 'hall_name', 'assigned_date', 'is_active']
-        read_only_fields = ['id', 'assigned_date', 'faculty_name', 'hall_name']
+        model = HostelStaffAssignment
+        fields = [
+            'id', 'hostel', 'hostel_name', 'user', 'user_name', 'user_email',
+            'role', 'start_date', 'end_date', 'is_active',
+            'assigned_by', 'assigned_by_name', 'created_at'
+        ]
+        read_only_fields = fields
+
+    def get_user_name(self, obj):
+        return obj.user.get_full_name() or obj.user.username
+
+    def get_assigned_by_name(self, obj):
+        if obj.assigned_by:
+            return obj.assigned_by.get_full_name() or obj.assigned_by.username
+        return None
+
+
+class StaffAssignmentCreateSerializer(serializers.Serializer):
+    """
+    Create serializer for staff assignment.
+
+    Validates:
+    - User exists
+    - Role is valid
+    - BR-HM-019.b: Warns (does not block) if staff has concurrent active assignments
+    """
+    user_id = serializers.IntegerField()
+    role = serializers.ChoiceField(choices=StaffRoleChoices.choices)
+    start_date = serializers.DateField()
+    end_date = serializers.DateField(required=False, allow_null=True)
+
+    def validate_user_id(self, value):
+        from django.contrib.auth.models import User
+        if not User.objects.filter(id=value).exists():
+            raise serializers.ValidationError(f"User with ID {value} does not exist.")
+        return value
+
+    def validate(self, data):
+        from django.contrib.auth.models import User
+        user = User.objects.get(id=data['user_id'])
+
+        # BR-HM-019.b: Check concurrent active assignments (warn, don't block)
+        concurrent_count = HostelStaffAssignment.objects.filter(
+            user=user, is_active=True
+        ).count()
+
+        if concurrent_count >= 2:
+            data['_warning'] = (
+                f"{user.get_full_name() or user.username} already has "
+                f"{concurrent_count} active hostel assignment(s). "
+                "This assignment will proceed, but please review."
+            )
+
+        if data.get('end_date') and data['end_date'] < data['start_date']:
+            raise serializers.ValidationError("End date must be after start date.")
+
+        return data
+
+
+class HostelAuditLogSerializer(serializers.ModelSerializer):
+    """Read-only serializer for audit log display."""
+    performed_by_name = serializers.SerializerMethodField()
+    hostel_name = serializers.CharField(source='hostel.name', read_only=True)
+
+    class Meta:
+        model = HostelAuditLog
+        fields = [
+            'id', 'hostel', 'hostel_name', 'action', 'performed_by',
+            'performed_by_name', 'detail_json', 'timestamp'
+        ]
+        read_only_fields = fields
+
+    def get_performed_by_name(self, obj):
+        if obj.performed_by:
+            return obj.performed_by.get_full_name() or obj.performed_by.username
+        return None
+
 
 
 # ══════════════════════════════════════════════════════════════
-# HALL ROOM SERIALIZERS
+# LEAVE SERIALIZERS (HM-WF-101)
 # ══════════════════════════════════════════════════════════════
-
-class HallRoomSerializer(serializers.ModelSerializer):
-    """Serializer for Hall Room details."""
-    hall_name = serializers.CharField(source='hall.hall_name', read_only=True)
-    
-    class Meta:
-        model = HallRoom
-        fields = [
-            'id', 'hall', 'hall_name', 'room_number', 'block_number',
-            'room_type', 'capacity', 'current_occupancy', 'status',
-            'created_at', 'updated_at'
-        ]
-        read_only_fields = ['id', 'created_at', 'updated_at', 'hall_name']
-
-
-class HallRoomCreateUpdateSerializer(serializers.ModelSerializer):
-    """Create and update serializer for Hall Room."""
-    
-    class Meta:
-        model = HallRoom
-        fields = ['room_number', 'block_number', 'room_type', 'capacity']
-    
-    def validate_capacity(self, value):
-        """Validate capacity is positive."""
-        if value <= 0:
-            raise serializers.ValidationError("Capacity must be greater than 0.")
-        return value
-    
-    def validate_room_number(self, value):
-        """Validate room_number format."""
-        if not value or len(value) > 20:
-            raise serializers.ValidationError("Room number must be between 1 and 20 characters.")
-        return value
 
 
 # ══════════════════════════════════════════════════════════════
@@ -364,37 +471,67 @@ class HostelComplaintEscalateSerializer(serializers.Serializer):
 
 
 # ══════════════════════════════════════════════════════════════
-# ROOM ALLOCATION SERIALIZERS (HM-WF-103)
+# HM-WF-103: ACCOMMODATION SERIALIZERS
 # ══════════════════════════════════════════════════════════════
 
-class RoomAllocationSerializer(serializers.ModelSerializer):
-    """Read-only serializer for Room Allocation details with optimized queries."""
-    student_name = serializers.CharField(source='student.id.user.username', read_only=True)
-    room_number = serializers.CharField(source='room.room_number', read_only=True, allow_null=True)
-    hall_name = serializers.CharField(source='hall.hall_name', read_only=True, allow_null=True)
-    allocated_by_name = serializers.CharField(source='allocated_by.id.user.username', read_only=True, allow_null=True)
-    
+class AccommodationApplicationWindowSerializer(serializers.ModelSerializer):
+    """Serializer for accommodation application windows."""
+    is_open = serializers.BooleanField(read_only=True)
+
     class Meta:
-        model = RoomAllocation
+        model = AccommodationApplicationWindow
+        fields = ['id', 'name', 'start_date', 'end_date', 'is_active', 'is_open', 'created_at']
+        read_only_fields = ['id', 'is_open', 'created_at']
+
+
+class AccommodationRequestSerializer(serializers.ModelSerializer):
+    """Serializer for accommodation requests."""
+    student_name = serializers.CharField(source='student.id.user.get_full_name', read_only=True)
+    roll_number = serializers.CharField(source='student.id.id', read_only=True)
+    window_name = serializers.CharField(source='window.name', read_only=True)
+
+    class Meta:
+        model = AccommodationRequest
         fields = [
-            'id', 'student', 'student_name', 'room', 'room_number', 'hall', 'hall_name', 'status',
-            'allocation_date', 'release_date', 'allocated_by', 'allocated_by_name'
+            'id', 'student', 'student_name', 'roll_number',
+            'window', 'window_name', 'preferred_hostel_type',
+            'preferred_room_type', 'status', 'submitted_at'
+        ]
+        read_only_fields = ['id', 'student', 'status', 'submitted_at', 'student_name', 'window_name', 'roll_number']
+
+    def validate(self, data):
+        """Ensure student doesn't have multiple requests for the same window."""
+        request = self.context.get('request')
+        if request and request.method == 'POST':
+            student = getattr(request.user, 'student', None)
+            if not student:
+                raise serializers.ValidationError("Only students can submit requests.")
+            
+            # This is also enforced by unique_together in Model
+            window = data.get('window')
+            if AccommodationRequest.objects.filter(student=student, window=window).exists():
+                raise serializers.ValidationError("You have already submitted a request for this window.")
+        
+        return data
+
+
+class RoomAllotmentSerializer(serializers.ModelSerializer):
+    """Serializer for active room allotments."""
+    student_id = serializers.CharField(source='student.id.user.username', read_only=True)
+    student_name = serializers.CharField(source='student.id.user.get_full_name', read_only=True)
+    hostel_name = serializers.CharField(source='hostel.name', read_only=True)
+    room_number = serializers.CharField(source='room.room_number', read_only=True)
+    room = RoomSetupSerializer(read_only=True)
+
+    class Meta:
+        model = RoomAllotment
+        fields = [
+            'id', 'student', 'student_id', 'student_name', 'room', 'room_number', 'hostel',
+            'hostel_name', 'allotted_by', 'allotted_at', 'vacated_at', 'is_active'
         ]
         read_only_fields = fields
 
 
-class RoomAllocationCreateSerializer(serializers.ModelSerializer):
-    """Create serializer for Room Allocation."""
-    
-    class Meta:
-        model = RoomAllocation
-        fields = ['room', 'allocation_date']
-    
-    def validate_allocation_date(self, value):
-        """Validate allocation_date."""
-        if value < timezone.now().date():
-            raise serializers.ValidationError("Allocation date cannot be in the past.")
-        return value
 
 
 # ══════════════════════════════════════════════════════════════
@@ -682,7 +819,7 @@ from ..models import RoomVacationRequest, ExtendedStayApplication
 
 class RoomVacationRequestSerializer(serializers.ModelSerializer):
     student_name = serializers.CharField(source='student.id.user.username', read_only=True)
-    room_number = serializers.CharField(source='room.room_no', read_only=True)
+    room_number = serializers.CharField(source='room.room_number', read_only=True)
     hall_name = serializers.CharField(source='hall.hall_name', read_only=True)
 
     class Meta:
@@ -696,7 +833,7 @@ class RoomVacationRequestSerializer(serializers.ModelSerializer):
 
 class ExtendedStayApplicationSerializer(serializers.ModelSerializer):
     student_name = serializers.CharField(source='student.id.user.username', read_only=True)
-    room_number = serializers.CharField(source='room.room_no', read_only=True)
+    room_number = serializers.CharField(source='room.room_number', read_only=True)
     hall_name = serializers.CharField(source='hall.hall_name', read_only=True)
 
     class Meta:
@@ -723,3 +860,52 @@ class HostelAttendanceSerializer(serializers.ModelSerializer):
         read_only_fields = ['id', 'student_name', 'roll_number']
 
 
+    def get_total_rooms(self, obj):
+        return obj.rooms_setup.count()
+
+
+class RoomCapacityDashboardSerializer(serializers.ModelSerializer):
+    """High-level summary of hostel capacity for Super Admin."""
+    occupied_seats = serializers.SerializerMethodField()
+    total_rooms = serializers.SerializerMethodField()
+    
+    class Meta:
+        model = Hostel
+        fields = [
+            'hall_id', 'name', 'type', 'total_capacity', 
+            'occupied_seats', 'total_rooms', 'status'
+        ]
+        
+    def get_occupied_seats(self, obj):
+        return obj.allotments.filter(is_active=True).count()
+        
+    def get_total_rooms(self, obj):
+        return obj.rooms_setup.count()
+
+
+class BulkAllotmentSerializer(serializers.Serializer):
+    """Serializer for bulk allotment actions."""
+    request_ids = serializers.ListField(
+        child=serializers.IntegerField(),
+        min_length=1
+    )
+
+
+class BatchAllocationSerializer(serializers.Serializer):
+    """
+    Serializer for bulk batch allocation by Super Admin.
+    Matches students by category, admission year, and gender.
+    """
+    PROGRAMME_CATEGORIES = [
+        ('UG', 'Undergraduate'),
+        ('PG', 'Postgraduate'),
+        ('M.Tech', 'M.Tech'),
+    ]
+    GENDER_CHOICES = [
+        ('M', 'Male'),
+        ('F', 'Female'),
+    ]
+    
+    programme_category = serializers.ChoiceField(choices=PROGRAMME_CATEGORIES)
+    admission_year = serializers.IntegerField()
+    gender = serializers.ChoiceField(choices=GENDER_CHOICES)
