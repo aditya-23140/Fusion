@@ -18,7 +18,7 @@ admin.site.register(RoomChangeRequest)
 # ══════════════════════════════════════════════════════════════
 # LEAVE MANAGEMENT (HM-WF-101)
 # ══════════════════════════════════════════════════════════════
-admin.site.register(HostelLeave)
+admin.site.register(LeaveRequest)
 
 # ══════════════════════════════════════════════════════════════
 # COMPLAINT MANAGEMENT (HM-WF-102)
@@ -56,7 +56,7 @@ admin.site.register(GuestRoomBooking)
 # ══════════════════════════════════════════════════════════════
 # ATTENDANCE & RECORDS
 # ══════════════════════════════════════════════════════════════
-admin.site.register(HostelStudentAttendance)
+admin.site.register(StudentAttendanceRecord)
 
 # ══════════════════════════════════════════════════════════════
 # STUDENT & TRANSACTION RECORDS

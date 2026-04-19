@@ -23,7 +23,7 @@ from datetime import timedelta
 import re
 
 from ..models import (
-    HostelLeave,
+    LeaveRequest, StudentAttendanceRecord, AttendanceStatus,
     HostelComplaint,
     RoomAllocationChange,
     HostelFine,
@@ -32,7 +32,6 @@ from ..models import (
     HostelInventory,
     GuestRoom,
     GuestRoomBooking,
-    HostelStudentAttendance,
     LeaveStatusChoices,
     ComplaintStatusChoices,
     ComplaintCategoryChoices,
@@ -361,42 +360,42 @@ class HostelAuditLogSerializer(serializers.ModelSerializer):
 # LEAVE SERIALIZERS (HM-WF-101)
 # ══════════════════════════════════════════════════════════════
 
-class HostelLeaveSerializer(serializers.ModelSerializer):
-    """Read-only serializer for Leave details."""
+class LeaveRequestSerializer(serializers.ModelSerializer):
+    """Read-only serializer for Leave Request details."""
     student_name = serializers.CharField(source='student.id.user.username', read_only=True)
-    processed_by_name = serializers.CharField(source='processed_by.id.user.username', read_only=True, allow_null=True)
+    decided_by_name = serializers.CharField(source='decided_by.username', read_only=True, allow_null=True)
     
     class Meta:
-        model = HostelLeave
+        model = LeaveRequest
         fields = [
-            'id', 'student', 'student_name', 'start_date', 'end_date',
-            'reason', 'destination', 'contact_phone', 'status', 'remarks',
-            'processed_by', 'processed_by_name', 'created_at', 'updated_at'
+            'id', 'student', 'student_name', 'hostel', 'start_date', 'end_date',
+            'reason', 'status', 'documents', 'decision_remarks',
+            'decided_by', 'decided_by_name', 'created_at', 'updated_at'
         ]
         read_only_fields = fields
 
 
-class HostelLeaveCreateSerializer(serializers.ModelSerializer):
-    """Create serializer for Leave with field-level validation."""
+class LeaveRequestCreateSerializer(serializers.ModelSerializer):
+    """Create serializer for Leave Request with mandatory documents validation."""
     
     class Meta:
-        model = HostelLeave
-        fields = ['start_date', 'end_date', 'reason', 'destination', 'contact_phone', 'file_upload']
+        model = LeaveRequest
+        fields = ['start_date', 'end_date', 'reason', 'documents']
     
     def validate_start_date(self, value):
-        """Validate start_date is in future."""
+        """Validate start_date is not in past."""
         if value < timezone.now().date():
-            raise serializers.ValidationError("Start date must be in the future.")
+            raise serializers.ValidationError("Start date cannot be in the past.")
         return value
     
     def validate_end_date(self, value):
-        """Validate end_date format."""
+        """Validate end_date is in future."""
         if value < timezone.now().date():
             raise serializers.ValidationError("End date must be in the future.")
         return value
     
     def validate(self, data):
-        """Validate start_date <= end_date."""
+        """Validate range, duration, and mandatory documents."""
         if data['start_date'] > data['end_date']:
             raise serializers.ValidationError("End date must be after or equal to start date.")
         
@@ -406,14 +405,17 @@ class HostelLeaveCreateSerializer(serializers.ModelSerializer):
         
         if not data.get('reason') or len(data['reason'].strip()) < 10:
             raise serializers.ValidationError("Reason must be at least 10 characters long.")
+
+        if not data.get('documents'):
+            raise serializers.ValidationError("Supporting documents are mandatory for leave submission.")
         
         return data
 
 
-class HostelLeaveApprovalSerializer(serializers.Serializer):
-    """Serializer for Leave approval/rejection."""
+class LeaveRequestDecisionSerializer(serializers.Serializer):
+    """Serializer for Leave decision (Approve/Reject)."""
     status = serializers.ChoiceField(choices=[LeaveStatusChoices.APPROVED, LeaveStatusChoices.REJECTED])
-    remarks = serializers.CharField(required=False, allow_blank=True, max_length=500)
+    decision_remarks = serializers.CharField(required=True, allow_blank=False, max_length=500)
 
 
 # ══════════════════════════════════════════════════════════════
@@ -863,14 +865,14 @@ class ExtendedStayApplicationSerializer(serializers.ModelSerializer):
 # ATTENDANCE SERIALIZERS
 # ══════════════════════════════════════════════════════════════
 
-class HostelAttendanceSerializer(serializers.ModelSerializer):
-    """Serializer for hostel student attendance."""
-    student_name = serializers.CharField(source='student_id.id.user.username', read_only=True)
-    roll_number = serializers.CharField(source='student_id.id.user.username', read_only=True)
+class StudentAttendanceRecordSerializer(serializers.ModelSerializer):
+    """Serializer for modern student attendance records."""
+    student_name = serializers.CharField(source='student.id.user.username', read_only=True)
+    roll_number = serializers.CharField(source='student.id.user.username', read_only=True)
     
     class Meta:
-        model = HostelStudentAttendance
-        fields = ['id', 'hall', 'student_id', 'student_name', 'roll_number', 'date', 'present', 'remarks']
+        model = StudentAttendanceRecord
+        fields = ['id', 'student', 'student_name', 'roll_number', 'date', 'status', 'leave_request']
         read_only_fields = ['id', 'student_name', 'roll_number']
 
 

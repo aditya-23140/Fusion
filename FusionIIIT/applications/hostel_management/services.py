@@ -12,8 +12,9 @@ from datetime import timedelta
 from decimal import Decimal
 
 from .models import (
-    HostelLeave, HostelComplaint, RoomAllocationChange,
-    HostelFine, HostelStudentAttendance,
+    LeaveRequest, StudentAttendanceRecord, AttendanceStatus,
+    HostelComplaint, RoomAllocationChange,
+    HostelFine,
     GuestRoomBooking, GuestRoom, Hostel, Room, RoomAllotment,
     HostelStaffAssignment,
     AccommodationApplicationWindow, AccommodationRequest,
@@ -21,6 +22,7 @@ from .models import (
     AllocationChangeStatusChoices, FineStatusChoices, BookingStatusChoices,
     StaffRoleChoices, RoomSetupStatusChoices
 )
+from notifications.signals import notify
 from django.db import transaction
 from applications.globals.models import Faculty, Staff
 from . import selectors
@@ -119,14 +121,14 @@ class FineValidationError(HostelManagementException):
 # HM-WF-101: LEAVE MANAGEMENT SERVICES
 # ══════════════════════════════════════════════════════════════
 
-def create_leave_request(student, start_date, end_date, reason, destination=None, contact_phone=None):
+def create_leave_request(student, start_date, end_date, reason, documents=None):
     """
     Create a new leave request.
     
     Enforces:
     - BR-HM-101: Leave Eligibility Based on Hostel Residency
     - BR-HM-102: Leave Date Boundary Validation
-    - BR-HM-103: Mandatory Leave Justification Policy
+    - BR-HM-103: Mandatory Leave Justification & Documents
     """
     # BR-HM-101: Check if student is currently in hostel
     current_allotment = selectors.get_active_allotment_by_student(student)
@@ -147,30 +149,32 @@ def create_leave_request(student, start_date, end_date, reason, destination=None
     if leave_duration > 90:
         raise LeaveDateError("Leave duration cannot exceed 90 days.")
     
-    # BR-HM-103: Check for mandatory justification
+    # BR-HM-103: Check for mandatory justification & documents
     if not reason or len(reason.strip()) < 10:
         raise LeaveJustificationError(
             "Leave must have a valid reason (at least 10 characters)."
         )
     
+    if not documents:
+        raise LeaveJustificationError(
+            "Supporting documents are strictly mandatory for all leave requests."
+        )
+    
     # Create the leave request
-    leave = HostelLeave.objects.create(
+    leave = LeaveRequest.objects.create(
         student=student,
-        student_name=student.id.user.get_full_name() or student.id.user.username,
-        roll_num=student.id.user.username,
+        hostel=current_allotment.hostel,
         start_date=start_date,
         end_date=end_date,
         reason=reason,
-        destination=destination,
-        contact_phone=contact_phone,
-        status=LeaveStatusChoices.PENDING,
-        hostel=current_allotment.hostel
+        documents=documents,
+        status=LeaveStatusChoices.PENDING
     )
     
     return leave
 
 
-def approve_leave(leave_id, processed_by, remarks=None):
+def approve_leave(leave_id, decided_by, remarks=None):
     """
     Approve a leave request.
     
@@ -180,7 +184,7 @@ def approve_leave(leave_id, processed_by, remarks=None):
     """
     leave = selectors.get_student_leave(leave_id)
     if not leave:
-        raise HostelManagementException(f"Leave {leave_id} not found.")
+        raise HostelManagementException(f"Leave Request {leave_id} not found.")
     
     if leave.status != LeaveStatusChoices.PENDING:
         raise HostelManagementException(
@@ -188,27 +192,36 @@ def approve_leave(leave_id, processed_by, remarks=None):
         )
     
     # BR-HM-104: Authority check (caretaker/warden must process)
-    # This should be enforced at view level, but check here too
-    if not processed_by:
+    if not decided_by:
         raise LeaveAuthorityError("Leave approval requires authorized personnel.")
     
-    leave.status = LeaveStatusChoices.APPROVED
-    leave.processed_by = processed_by
-    leave.remarks = remarks
-    leave.updated_at = timezone.now()
-    leave.save()
+    with transaction.atomic():
+        leave.status = LeaveStatusChoices.APPROVED
+        leave.decided_by = decided_by
+        leave.decision_remarks = remarks
+        leave.updated_at = timezone.now()
+        leave.save()
+        
+        # BR-HM-105: Mark student as OnLeave for leave dates
+        _mark_leave_attendance(leave)
     
-    # BR-HM-105: Mark student as absent for leave dates
-    _mark_leave_attendance(leave.student, leave.start_date, leave.end_date, is_present=False)
+    # Send Notification
+    notify.send(
+        sender=decided_by,
+        recipient=leave.student.id.user,
+        verb="approved your leave request",
+        action_object=leave,
+        description=f"Your leave from {leave.start_date} to {leave.end_date} has been approved."
+    )
     
     return leave
 
 
-def reject_leave(leave_id, processed_by, rejection_reason):
+def reject_leave(leave_id, decided_by, rejection_reason):
     """Reject a leave request."""
     leave = selectors.get_student_leave(leave_id)
     if not leave:
-        raise HostelManagementException(f"Leave {leave_id} not found.")
+        raise HostelManagementException(f"Leave Request {leave_id} not found.")
     
     if leave.status != LeaveStatusChoices.PENDING:
         raise HostelManagementException(
@@ -216,13 +229,22 @@ def reject_leave(leave_id, processed_by, rejection_reason):
         )
     
     if not rejection_reason or len(rejection_reason.strip()) < 5:
-        raise HostelManagementException("Rejection must have a valid reason.")
+        raise HostelManagementException("Rejection remarks are mandatory and must be at least 5 characters.")
     
     leave.status = LeaveStatusChoices.REJECTED
-    leave.processed_by = processed_by
-    leave.remarks = rejection_reason
+    leave.decided_by = decided_by
+    leave.decision_remarks = rejection_reason
     leave.updated_at = timezone.now()
     leave.save()
+    
+    # Send Notification
+    notify.send(
+        sender=decided_by,
+        recipient=leave.student.id.user,
+        verb="rejected your leave request",
+        action_object=leave,
+        description=f"Your leave from {leave.start_date} to {leave.end_date} has been rejected. Reason: {rejection_reason}"
+    )
     
     return leave
 
@@ -245,47 +267,40 @@ def cancel_leave(leave_id):
     return leave
 
 
-def _mark_leave_attendance(student, start_date, end_date, is_present):
-    """Mark attendance for leave dates."""
-    current_allocation = selectors.get_active_allotment_by_student(student)
-    if not current_allocation or not current_allocation.room:
-        return
+def _mark_leave_attendance(leave):
+    """Mark attendance for leave dates (Internal only)."""
+    current_date = leave.start_date
     
-    hostel = current_allocation.hostel
-    current_date = start_date
-    
-    while current_date <= end_date:
-        HostelStudentAttendance.objects.update_or_create(
-            student_id=student,
+    while current_date <= leave.end_date:
+        StudentAttendanceRecord.objects.update_or_create(
+            student=leave.student,
             date=current_date,
             defaults={
-                'hostel': hostel,
-                'present': is_present,
-                'remarks': 'Leave' if not is_present else None
+                'status': AttendanceStatus.ON_LEAVE,
+                'leave_request': leave
             }
         )
         current_date += timedelta(days=1)
 
 
-def mark_attendance(hostel, date, attendance_data):
+def mark_attendance_bulk(date, attendance_data):
     """
-    Bulk mark attendance for students in a hall.
-    attendance_data: list of dicts [{'student_id': id, 'present': bool, 'remarks': str}]
+    Bulk mark attendance for students.
+    attendance_data: list of dicts [{'student_id': id, 'status': status, 'remarks': str}]
     """
     from applications.academic_information.models import Student
     records = []
-    for entry in attendance_data:
-        student = Student.objects.get(pk=entry['student_id'])
-        record, created = HostelStudentAttendance.objects.update_or_create(
-            student_id=student,
-            date=date,
-            defaults={
-                'hostel': hostel,
-                'present': entry['present'],
-                'remarks': entry.get('remarks')
-            }
-        )
-        records.append(record)
+    with transaction.atomic():
+        for entry in attendance_data:
+            student = Student.objects.get(pk=entry['student_id'])
+            record, created = StudentAttendanceRecord.objects.update_or_create(
+                student=student,
+                date=date,
+                defaults={
+                    'status': entry['status'],
+                }
+            )
+            records.append(record)
     return records
 
 

@@ -16,16 +16,17 @@ from django.utils import timezone
 from datetime import timedelta
 
 from .models import (
-    Hostel, Room, HostelStaffAssignment,
-    HostelLeave, HostelComplaint, RoomAllocationChange,
+    LeaveRequest, StudentAttendanceRecord, AttendanceStatus,
+    HostelComplaint, RoomAllocationChange,
     HostelFine, StaffSchedule, HostelInventory,
     HostelNoticeBoard, GuestRoom, GuestRoomBooking,
-    HostelTransactionHistory, HostelStudentAttendance, WorkerReport,
+    HostelTransactionHistory, WorkerReport,
     Hall, HallWarden, HallCaretaker, StudentDetails,
     LeaveStatusChoices, ComplaintStatusChoices, ComplaintPriorityChoices,
     FineStatusChoices, BookingStatusChoices,
     AccommodationApplicationWindow, AccommodationRequest, RoomAllotment,
-    HostelTypeChoices, RoomTypeChoices
+    HostelTypeChoices, RoomTypeChoices,
+    Hostel, Room, HostelStaffAssignment
 )
 from applications.academic_information.models import Student
 from applications.globals.models import Staff, Faculty
@@ -243,12 +244,12 @@ def list_students_by_academic_batch(batch_id):
 
 def get_student_leave(leave_id):
     """Get a specific leave record."""
-    return HostelLeave.objects.filter(id=leave_id).first()
+    return LeaveRequest.objects.filter(id=leave_id).first()
 
 
 def get_student_current_leave(student_id, start_date, end_date):
     """Check if student has overlapping leave in date range."""
-    return HostelLeave.objects.filter(
+    return LeaveRequest.objects.filter(
         student_id=student_id,
         status=LeaveStatusChoices.APPROVED,
         start_date__lt=end_date,
@@ -258,21 +259,21 @@ def get_student_current_leave(student_id, start_date, end_date):
 
 def list_student_leaves(student_id):
     """Get all leaves for a student."""
-    return HostelLeave.objects.filter(
+    return LeaveRequest.objects.filter(
         student_id=student_id
     ).order_by('-created_at')
 
 
 def list_pending_leaves():
     """Get all pending leaves."""
-    return HostelLeave.objects.filter(
+    return LeaveRequest.objects.filter(
         status=LeaveStatusChoices.PENDING
     ).order_by('-created_at')
 
 
 def list_pending_leaves_by_hall(hall_id):
     """Get pending leaves for students in a specific hostel."""
-    return HostelLeave.objects.filter(
+    return LeaveRequest.objects.filter(
         status=LeaveStatusChoices.PENDING,
         student__room_allotments__hostel__hall_id=hall_id,
         student__room_allotments__is_active=True
@@ -281,7 +282,7 @@ def list_pending_leaves_by_hall(hall_id):
 
 def count_student_approved_leaves(student_id, year=None):
     """Count approved leaves for a student in a year."""
-    query = HostelLeave.objects.filter(
+    query = LeaveRequest.objects.filter(
         student_id=student_id,
         status=LeaveStatusChoices.APPROVED
     )
@@ -292,7 +293,7 @@ def count_student_approved_leaves(student_id, year=None):
 
 def list_student_leaves_by_status(student_id, status):
     """Get leaves for a student by status."""
-    return HostelLeave.objects.filter(
+    return LeaveRequest.objects.filter(
         student_id=student_id,
         status=status
     ).order_by('-created_at')
@@ -300,7 +301,7 @@ def list_student_leaves_by_status(student_id, status):
 
 def list_leaves_requiring_attendance_update(start_date, end_date):
     """Get approved leaves in date range requiring attendance marking."""
-    return HostelLeave.objects.filter(
+    return LeaveRequest.objects.filter(
         status=LeaveStatusChoices.APPROVED,
         start_date__lte=end_date,
         end_date__gte=start_date
@@ -915,13 +916,13 @@ def get_student_guest_bookings(user):
 
 def get_attendance_record(attendance_id):
     """Get a specific attendance record."""
-    return HostelStudentAttendance.objects.filter(id=attendance_id).first()
+    return StudentAttendanceRecord.objects.filter(id=attendance_id).first()
 
 
 def list_student_attendance(student_id, days=30):
     """Get attendance records for a student in last X days."""
     start_date = timezone.now().date() - timedelta(days=days)
-    return HostelStudentAttendance.objects.filter(
+    return StudentAttendanceRecord.objects.filter(
         student_id=student_id,
         date__gte=start_date
     ).order_by('-date')
@@ -929,18 +930,18 @@ def list_student_attendance(student_id, days=30):
 
 def list_attendance_by_date(hall_id, date):
     """Get attendance records for a hostel on a specific date."""
-    return HostelStudentAttendance.objects.filter(
-        hostel__hall_id=hall_id,
+    return StudentAttendanceRecord.objects.filter(
+        student__room_allotments__hostel__hall_id=hall_id,
         date=date
-    ).order_by('student__user__username')
+    ).order_by('student__id__user__username')
 
 
 def list_date_attendance_range(hall_id, start_date, end_date):
     """Get attendance records for a date range."""
-    return HostelStudentAttendance.objects.filter(
-        hall__hall_id=hall_id,
+    return StudentAttendanceRecord.objects.filter(
+        student__room_allotments__hostel__hall_id=hall_id,
         date__range=[start_date, end_date]
-    ).order_by('-date', 'student__user__username')
+    ).order_by('-date', 'student__id__user__username')
 
 
 def get_transaction_history(transaction_id):
@@ -1001,9 +1002,9 @@ def get_monthly_report(staff_id, year, month):
 
 def get_all_leaves():
     """Get all leaves with optimized queries (for staff views)."""
-    return HostelLeave.objects.select_related(
+    return LeaveRequest.objects.select_related(
         'student__id__user',
-        'processed_by__id__user'
+        'decided_by'
     ).all().order_by('-created_at')
 
 
@@ -1011,12 +1012,12 @@ def get_student_leaves(user):
     """Get all leaves for a student user."""
     student = get_student(user.id)
     if not student:
-        return HostelLeave.objects.none()
-    return HostelLeave.objects.filter(
+        return LeaveRequest.objects.none()
+    return LeaveRequest.objects.filter(
         student_id=student.pk
     ).select_related(
         'student__id__user',
-        'processed_by__id__user'
+        'decided_by'
     ).order_by('-created_at')
 
 

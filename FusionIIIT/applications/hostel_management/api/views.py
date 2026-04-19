@@ -25,7 +25,7 @@ Supports Workflows:
 
 from datetime import datetime
 from django.utils import timezone
-from rest_framework import generics, status
+from rest_framework import generics, status, parsers
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated, IsAdminUser, BasePermission
 from rest_framework.pagination import PageNumberPagination
@@ -34,21 +34,22 @@ from django.contrib.auth.models import User
 from applications.globals.models import Staff
 from applications.globals.models import Faculty
 from applications.hostel_management.models import (
-    HostelLeave, HostelComplaint, RoomAllocationChange,
+    LeaveRequest, StudentAttendanceRecord, AttendanceStatus,
+    HostelComplaint, RoomAllocationChange,
     HostelFine, StaffSchedule, HostelInventory, GuestRoomBooking,
-    HostelNoticeBoard, HostelStudentAttendance,
+    HostelNoticeBoard,
     Hostel, Room, RoomAllotment, HostelStaffAssignment
 )
 from . import serializers
 from .serializers import (
-    HostelLeaveSerializer, HostelLeaveCreateSerializer, HostelLeaveApprovalSerializer,
+    LeaveRequestSerializer, LeaveRequestCreateSerializer, LeaveRequestDecisionSerializer,
     HostelComplaintSerializer, HostelComplaintUpdateSerializer,
     RoomAllocationChangeSerializer,
     RoomAllocationChangeApprovalSerializer,
     HostelFineSerializer, HostelFinePaymentSerializer, HostelFineWaiverSerializer,
     StaffScheduleSerializer, HostelInventorySerializer,
     GuestRoomBookingSerializer, GuestRoomBookingCreateSerializer, GuestRoomBookingApprovalSerializer,
-    HostelNoticeBoardSerializer, HostelAttendanceSerializer
+    HostelNoticeBoardSerializer, StudentAttendanceRecordSerializer
 )
 from .. import selectors, services
 from ..permissions import IsHostelSuperAdmin, IsAssignedToHostel
@@ -199,7 +200,7 @@ class RoomRenameView(generics.UpdateAPIView):
     def patch(self, request, *args, **kwargs):
         """
         Rename room.
-        Request body: { "room_number": "A101", "block_number": "A" }
+        Request body: { "room_number": "A101", "floor": 1 }
         """
         try:
             room_id = self.kwargs['pk']
@@ -231,56 +232,55 @@ class RoomRenameView(generics.UpdateAPIView):
 # ══════════════════════════════════════════════════════════════
 
 class LeaveListCreateView(generics.ListCreateAPIView):
-    """List leaves or submit a new leave request."""
+    """List leaves or submit a new leave request (BR-HM-101 to 103)."""
     permission_classes = [IsAuthenticated]
-    serializer_class = HostelLeaveSerializer
-
+    parser_classes = (parsers.MultiPartParser, parsers.FormParser, parsers.JSONParser)
+    
     def get_queryset(self):
-        """Get leaves for authenticated user or all leaves if staff."""
+        """Get leaves for authenticated student or all leaves for authorized staff."""
         user = self.request.user
-        if user.is_staff:
+        if selectors.is_user_warden_or_caretaker(user) or user.is_superuser:
             return selectors.get_all_leaves()
         return selectors.get_student_leaves(user)
 
     def get_serializer_class(self):
-        """Use writable serializer for POST, read-only for GET."""
+        """Use writable serializer for POST (enforces BR-HM-103), read-only for GET."""
         if self.request.method == 'POST':
-            return HostelLeaveCreateSerializer
-        return HostelLeaveSerializer
-
-    def post(self, request, *args, **kwargs):
-        serializer = self.get_serializer(data=request.data)
-        if not serializer.is_valid():
-            print(f"DEBUG: LeaveRequest validation failed: {serializer.errors}")
-        return super().post(request, *args, **kwargs)
+            return LeaveRequestCreateSerializer
+        return LeaveRequestSerializer
 
     def perform_create(self, serializer):
-        """Submit leave request via service."""
+        """Submit leave request via service with mandatory residency and document checks."""
         try:
-            # Get Student instance from User
-            student = selectors.get_student(self.request.user.id)
+            student = selectors.get_student(self.request.user)
             if not student:
-                print(f"DEBUG: User {self.request.user.username} (ID: {self.request.user.id}) is NOT a student.")
-                raise HostelManagementException("Only students can submit leave requests. Please login as a student to test this feature.")
+                raise HostelManagementException("Only students can submit leave requests.")
 
             services.create_leave_request(
                 student=student,
                 start_date=serializer.validated_data['start_date'],
                 end_date=serializer.validated_data['end_date'],
                 reason=serializer.validated_data['reason'],
-                destination=serializer.validated_data.get('destination'),
-                contact_phone=serializer.validated_data.get('contact_phone')
+                documents=self.request.FILES.get('documents') or serializer.validated_data.get('documents')
             )
         except (LeaveEligibilityError, LeaveDateError, HostelManagementException) as e:
-            print(f"DEBUG: LeaveRequest creation failed: {str(e)}")
             from rest_framework.exceptions import ValidationError
+            print(f"DEBUG: Leave creation failed logic check: {str(e)}")
             raise ValidationError({"detail": str(e)})
+
+    def post(self, request, *args, **kwargs):
+        """Override post to debug validation errors."""
+        serializer = self.get_serializer(data=request.data)
+        if not serializer.is_valid():
+            print(f"DEBUG: Serializer Errors: {serializer.errors}")
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        return super().post(request, *args, **kwargs)
 
 
 class LeaveMyListView(generics.ListAPIView):
     """List only the authenticated user's leave requests."""
     permission_classes = [IsAuthenticated]
-    serializer_class = HostelLeaveSerializer
+    serializer_class = LeaveRequestSerializer
 
     def get_queryset(self):
         return selectors.get_student_leaves(self.request.user)
@@ -289,58 +289,72 @@ class LeaveMyListView(generics.ListAPIView):
 class LeaveRetrieveUpdateView(generics.RetrieveUpdateAPIView):
     """Retrieve or update leave request details."""
     permission_classes = [IsAuthenticated]
-    serializer_class = HostelLeaveSerializer
+    serializer_class = LeaveRequestSerializer
 
     def get_object(self):
-        """Get leave by ID."""
-        return get_object_or_404(HostelLeave, pk=self.kwargs['pk'])
+        """Get leave request by ID."""
+        return get_object_or_404(LeaveRequest, pk=self.kwargs['pk'])
 
 
 class LeaveApproveView(generics.UpdateAPIView):
-    """Approve a leave request."""
-    permission_classes = [IsAuthenticated]
-    serializer_class = HostelLeaveApprovalSerializer
+    """Approve a leave request (BR-HM-104, BR-HM-105)."""
+    permission_classes = [IsAuthenticated, IsWardenOrCaretaker]
+    serializer_class = LeaveRequestDecisionSerializer
+
+    def post(self, request, *args, **kwargs):
+        """Debug post for approval."""
+        print(f"DEBUG: LeaveApprove Attempt by {request.user} for ID {self.kwargs.get('pk')}")
+        return self.patch(request, *args, **kwargs)
+
+    def patch(self, request, *args, **kwargs):
+        """Debug patch for approval."""
+        serializer = self.get_serializer(data=request.data)
+        if not serializer.is_valid():
+            print(f"DEBUG: LeaveApprove Serializer Errors: {serializer.errors}")
+        return super().patch(request, *args, **kwargs)
 
     def get_object(self):
-        """Get leave by ID."""
-        return get_object_or_404(HostelLeave, pk=self.kwargs['pk'])
+        """Get leave request by ID."""
+        return get_object_or_404(LeaveRequest, pk=self.kwargs['pk'])
 
     def perform_update(self, serializer):
-        """Approve leave via service."""
+        """Approve leave via service with atomic attendance sync."""
         leave = self.get_object()
-        staff = selectors.get_staff(self.request.user.id)
-        if not staff:
-             from rest_framework.exceptions import PermissionDenied
-             raise PermissionDenied("Only staff can approve leaves.")
-             
         services.approve_leave(
             leave_id=leave.id,
-            processed_by=staff,
-            remarks=serializer.validated_data.get('remarks')
+            decided_by=self.request.user,
+            remarks=serializer.validated_data.get('decision_remarks')
         )
 
 
 class LeaveRejectView(generics.UpdateAPIView):
     """Reject a leave request."""
     permission_classes = [IsAuthenticated]
-    serializer_class = HostelLeaveApprovalSerializer
+    serializer_class = LeaveRequestDecisionSerializer
+
+    def post(self, request, *args, **kwargs):
+        """Debug post for rejection."""
+        print(f"DEBUG: LeaveReject Attempt by {request.user} for ID {self.kwargs.get('pk')}")
+        return self.patch(request, *args, **kwargs)
+        
+    def patch(self, request, *args, **kwargs):
+        """Debug patch for rejection."""
+        serializer = self.get_serializer(data=request.data)
+        if not serializer.is_valid():
+            print(f"DEBUG: LeaveReject Serializer Errors: {serializer.errors}")
+        return super().patch(request, *args, **kwargs)
 
     def get_object(self):
-        """Get leave by ID."""
-        return get_object_or_404(HostelLeave, pk=self.kwargs['pk'])
+        """Get leave request by ID."""
+        return get_object_or_404(LeaveRequest, pk=self.kwargs['pk'])
 
     def perform_update(self, serializer):
         """Reject leave via service."""
         leave = self.get_object()
-        staff = selectors.get_staff(self.request.user.id)
-        if not staff:
-             from rest_framework.exceptions import PermissionDenied
-             raise PermissionDenied("Only staff can reject leaves.")
-
         services.reject_leave(
             leave_id=leave.id,
-            processed_by=staff,
-            rejection_reason=serializer.validated_data.get('rejection_reason', '')
+            decided_by=self.request.user,
+            rejection_reason=serializer.validated_data.get('decision_remarks', '')
         )
 
 
@@ -1221,13 +1235,13 @@ class ExtendedStayRejectView(generics.UpdateAPIView):
 class AttendanceByHostelView(generics.ListAPIView):
     """List attendance for a hostel on a specific date."""
     permission_classes = [IsWardenOrCaretaker]
-    serializer_class = HostelAttendanceSerializer
+    serializer_class = StudentAttendanceRecordSerializer
 
     def get_queryset(self):
         hall_id = self.request.query_params.get('hall_id')
         date_str = self.request.query_params.get('date')
         if not hall_id:
-             return HostelStudentAttendance.objects.none()
+             return StudentAttendanceRecord.objects.none()
         
         if date_str:
             try:
@@ -1237,29 +1251,24 @@ class AttendanceByHostelView(generics.ListAPIView):
         else:
             date = timezone.now().date()
         
-        return selectors.get_attendance_by_hostel(hall_id, date)
+        return selectors.list_attendance_by_date(hall_id, date)
 
 
 class AttendanceMarkView(generics.CreateAPIView):
     """Bulk mark attendance for a hall."""
-    permission_classes = [IsAuthenticated]
-    serializer_class = HostelAttendanceSerializer
+    permission_classes = [IsWardenOrCaretaker]
+    serializer_class = StudentAttendanceRecordSerializer
 
     def post(self, request, *args, **kwargs):
-        hall_id = request.data.get('hall_id')
         date_str = request.data.get('date')
         attendance_data = request.data.get('attendance', [])
         
-        if not hall_id or not date_str:
-            return Response({'error': 'hall_id and date are required'}, status=status.HTTP_400_BAD_REQUEST)
+        if not date_str:
+            return Response({'error': 'date is required'}, status=status.HTTP_400_BAD_REQUEST)
             
         try:
-            hostel = Hostel.objects.filter(hall_id=hall_id).first()
-            if not hostel:
-                return Response({'error': f'Hostel {hall_id} not found'}, status=status.HTTP_404_NOT_FOUND)
-            
             date = datetime.strptime(date_str, '%Y-%m-%d').date()
-            records = services.mark_attendance(hostel, date, attendance_data)
+            records = services.mark_attendance_bulk(date, attendance_data)
             serializer = self.get_serializer(records, many=True)
             return Response(serializer.data, status=status.HTTP_201_CREATED)
         except Exception as e:

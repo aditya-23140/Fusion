@@ -12,10 +12,18 @@ from django.utils import timezone
 # ══════════════════════════════════════════════════════════
 class LeaveStatusChoices(models.TextChoices):
     """Leave application status options."""
-    PENDING = "pending", "Pending"
-    APPROVED = "approved", "Approved"
-    REJECTED = "rejected", "Rejected"
-    CANCELLED = "cancelled", "Cancelled"
+    PENDING = "Pending", "Pending"
+    APPROVED = "Approved", "Approved"
+    REJECTED = "Rejected", "Rejected"
+    CANCELLED = "Cancelled", "Cancelled"
+
+
+class AttendanceStatus(models.TextChoices):
+    """Student attendance status options."""
+    PRESENT = "Present", "Present"
+    ABSENT = "Absent", "Absent"
+    ON_LEAVE = "OnLeave", "OnLeave"
+    NOT_MARKED = "NotMarked", "NotMarked"
 
 
 class ComplaintStatusChoices(models.TextChoices):
@@ -526,41 +534,6 @@ class HostelNoticeBoard(models.Model):
     def __str__(self):
         return self.title
 
-class HostelStudentAttendance(models.Model):
-    """
-    Records attendance of students in various Hall of Residences.
-
-    'hall' refers to the related Hall of Residence. 
-    'student_id' refers to the related Student.
-    'date' stores the date for which attendance is being taken.
-    'present' stores whether the student was present on a particular date.
-    """    
-    hostel = models.ForeignKey(Hostel, on_delete=models.CASCADE, related_name='student_attendance')
-    student_id = models.ForeignKey(Student, on_delete=models.CASCADE)
-    date = models.DateField()
-    present = models.BooleanField()
-    remarks = models.CharField(max_length=255, blank=True, null=True)
-
-    @property
-    def is_present(self):
-        """Alias for present (used by services)."""
-        return self.present
-    
-    @is_present.setter
-    def is_present(self, value):
-        self.present = value
-
-    @property
-    def student(self):
-        """Alias for student_id (used by services/selectors)."""
-        return self.student_id
-    
-    @student.setter
-    def student(self, value):
-        self.student_id = value
-    
-    def __str__(self):
-        return str(self.student_id) + '->' + str(self.date) + '-' + str(self.present)
 
 
 class HallRoom(models.Model):
@@ -655,51 +628,67 @@ class HostelInventory(models.Model):
         return f"{self.hostel.name} - {self.item_name}"
     
 
-class HostelLeave(models.Model):
-    """Student leave request model with business rule enforcement.
-    
-    Supports HM-WF-101: Student Leave Request Workflow
-    - HM-UC-001: Submit Leave Request
-    - HM-UC-002: Process Leave Request
-    - HM-UC-003: View Leave Status and History
-    - HM-UC-004: Update Attendance and Send Notification
-    - HM-UC-005: Generate Leave Report
-    
-    Enforces:
-    - BR-HM-101: Leave Eligibility Based on Hostel Residency
-    - BR-HM-102: Leave Date Boundary Validation
-    - BR-HM-103: Mandatory Leave Justification Policy
-    - BR-HM-104: Leave Decision Authority Enforcement
-    - BR-HM-105: Attendance Synchronization on Leave Approval
+# ══════════════════════════════════════════════════════════════
+# HM-WF-101: LEAVE MANAGEMENT & ATTENDANCE
+# ══════════════════════════════════════════════════════════════
+
+class LeaveRequest(models.Model):
     """
-    student = models.ForeignKey(Student, on_delete=models.CASCADE, related_name='hostel_leaves')
-    hostel = models.ForeignKey(Hostel, on_delete=models.CASCADE, null=True, blank=True, related_name='leave_requests')
-    student_name = models.CharField(max_length=100)
-    roll_num = models.CharField(max_length=20)
-    reason = models.TextField()
-    destination = models.CharField(max_length=255, blank=True, null=True)
-    phone_number = models.CharField(max_length=20, null=True, blank=True)
-    contact_phone = models.CharField(max_length=20, null=True, blank=True)
+    Leave application entity for managing student leaves.
+    
+    Supports:
+    - BR-HM-101: Active Allotment Prerequisite
+    - BR-HM-102: Date Boundary Validation
+    - BR-HM-103: Mandatory Justification & Documents
+    - BR-HM-104: Role-Based Decision Authority
+    """
+    student = models.ForeignKey(Student, on_delete=models.CASCADE, related_name='leave_requests')
+    hostel = models.ForeignKey(Hostel, on_delete=models.CASCADE, related_name='leaves')
     start_date = models.DateField()
     end_date = models.DateField()
+    reason = models.TextField()
     status = models.CharField(
         max_length=20,
         choices=LeaveStatusChoices.choices,
         default=LeaveStatusChoices.PENDING
     )
-    remarks = models.TextField(blank=True, null=True)
-    approval_date = models.DateField(null=True, blank=True)
-    file_upload = models.FileField(upload_to='hostel_management/leaves/', null=True, blank=True)
+    documents = models.FileField(upload_to='hostel/leaves/docs/', null=True, blank=True)
+    decision_remarks = models.TextField(null=True, blank=True)
+    decided_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='decided_leaves')
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
-    processed_by = models.ForeignKey(Staff, on_delete=models.SET_NULL, null=True, blank=True, related_name='processed_leaves')
-    
+
     class Meta:
-        db_table = 'hostel_management_hostelleave'
+        db_table = 'hostel_management_leaverequest'
         ordering = ['-created_at']
 
     def __str__(self):
-        return f"{self.student_name}'s Leave ({self.start_date} to {self.end_date})"
+        return f"{self.student.id.user.username} - {self.start_date} to {self.end_date} ({self.status})"
+
+
+class StudentAttendanceRecord(models.Model):
+    """
+    Daily attendance record for students in hostels.
+    
+    Supports:
+    - BR-HM-105: Atomic Synchronization on Leave Approval
+    """
+    student = models.ForeignKey(Student, on_delete=models.CASCADE, related_name='attendance_records')
+    date = models.DateField()
+    status = models.CharField(
+        max_length=20,
+        choices=AttendanceStatus.choices,
+        default=AttendanceStatus.NOT_MARKED
+    )
+    leave_request = models.ForeignKey(LeaveRequest, on_delete=models.SET_NULL, null=True, blank=True, related_name='attendance_entries')
+
+    class Meta:
+        db_table = 'hostel_management_studentattendancerecord'
+        unique_together = ['student', 'date']
+        ordering = ['-date']
+
+    def __str__(self):
+        return f"{self.student.id.user.username} - {self.date} ({self.status})"
 
 
 class HostelComplaint(models.Model):
