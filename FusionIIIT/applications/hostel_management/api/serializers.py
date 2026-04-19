@@ -148,6 +148,20 @@ class HostelCreateSerializer(serializers.ModelSerializer):
             'hall_id': {'required': True, 'allow_blank': False}
         }
 
+
+class RoomSerializer(serializers.ModelSerializer):
+    """
+    Serializer for the Room model.
+    """
+    class Meta:
+        from ..models import Room
+        model = Room
+        fields = [
+            'id', 'room_number', 'floor', 'capacity', 
+            'current_occupancy', 'status', 'hostel'
+        ]
+        read_only_fields = fields
+
     def validate_name(self, value):
         if not value or len(value.strip()) < 2:
             raise serializers.ValidationError("Hostel name must be at least 2 characters.")
@@ -540,9 +554,9 @@ class RoomAllotmentSerializer(serializers.ModelSerializer):
 
 class RoomAllocationChangeSerializer(serializers.ModelSerializer):
     """Serializer for Room Change - both read and write operations."""
-    student_name = serializers.CharField(source='student.user.username', read_only=True)
+    student_name = serializers.CharField(source='student.id.user.username', read_only=True)
     current_room_number = serializers.CharField(source='current_room.room_number', read_only=True)
-    requested_room_number = serializers.CharField(source='requested_room.room_number', read_only=True)
+    requested_room_number = serializers.CharField(source='requested_room.room_number', read_only=True, allow_null=True)
     warden_name = serializers.CharField(source='approved_by_warden.id.user.username', read_only=True, allow_null=True)
     caretaker_name = serializers.CharField(source='approved_by_caretaker.id.user.username', read_only=True, allow_null=True)
     

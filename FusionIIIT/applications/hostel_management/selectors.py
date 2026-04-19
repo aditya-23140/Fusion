@@ -39,6 +39,10 @@ def get_hostel_by_id(hall_id):
     """Get a single hostel by hall_id string."""
     return Hostel.objects.filter(hall_id=hall_id).first()
 
+def list_rooms_by_hostel(hall_id):
+    """Get all rooms for a hostel."""
+    return Room.objects.filter(hostel_id=hall_id).order_by('floor', 'room_number')
+
 
 def get_all_hostels():
     """Get all hostels."""

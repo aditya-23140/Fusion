@@ -22,6 +22,7 @@ from .models import (
     StaffRoleChoices, RoomSetupStatusChoices
 )
 from django.db import transaction
+from applications.globals.models import Faculty, Staff
 from . import selectors
 
 
@@ -550,8 +551,7 @@ def request_room_change(student, current_room, requested_room, reason):
         current_room=current_room,
         requested_room=requested_room,
         reason=reason,
-        status=AllocationChangeStatusChoices.REQUESTED,
-        requested_date=timezone.now().date()
+        status=AllocationChangeStatusChoices.REQUESTED
     )
     
     return change_request
@@ -628,7 +628,7 @@ def approve_room_change_caretaker(change_id, caretaker, remarks=None):
             student=change.student,
             room=change.requested_room,
             hostel=change.requested_room.hostel,
-            allotted_by=caretaker,
+            allotted_by=caretaker.id.user,
             is_active=True
         )
         
@@ -1160,18 +1160,28 @@ def resolve_complaint(complaint_id, resolution_notes=''):
 
 
 def approve_room_change(change_id, approved_by, remarks=None):
-    """Unified room change approval — determines warden vs caretaker step."""
+    """Unified room change approval — determines warden vs caretaker step.
+    
+    approved_by: User object (from request.user)
+    Resolves the appropriate Faculty/Staff object based on the approval step.
+    """
     from .models import AllocationChangeStatusChoices
     change = selectors.get_room_change(change_id)
     if not change:
         raise HostelManagementException(f"Room change {change_id} not found.")
     
     if change.status == AllocationChangeStatusChoices.REQUESTED:
-        # First approval: warden
-        return approve_room_change_warden(change_id, approved_by, remarks)
+        # First approval: warden (needs Faculty object)
+        faculty = selectors.get_faculty(approved_by.id) if not isinstance(approved_by, Faculty) else approved_by
+        if not faculty:
+            raise DualApprovalError("Approver must have an active Faculty profile to complete the Warden approval step.")
+        return approve_room_change_warden(change_id, faculty, remarks)
     elif change.status == AllocationChangeStatusChoices.APPROVED_WARDEN:
-        # Second approval: caretaker
-        return approve_room_change_caretaker(change_id, approved_by, remarks)
+        # Second approval: caretaker (needs Staff/User object)
+        staff = selectors.get_staff(approved_by.id) if not isinstance(approved_by, Staff) else approved_by
+        if not staff:
+            raise DualApprovalError("Approver must have an active Staff profile to complete the Caretaker finalization step.")
+        return approve_room_change_caretaker(change_id, staff, remarks)
     else:
         raise HostelManagementException(
             f"Room change cannot be approved in {change.status} status."

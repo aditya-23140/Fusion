@@ -173,6 +173,19 @@ class StaffListView(generics.ListAPIView):
             )
 
 
+class ListRoomsByHostelView(generics.ListAPIView):
+    """
+    List all rooms for a specific hostel.
+    GET /api/hostel/halls/<hall_id>/rooms/
+    """
+    permission_classes = [IsAuthenticated]
+    serializer_class = serializers.RoomSerializer
+
+    def get_queryset(self):
+        hostel_id = self.kwargs.get('pk')
+        return selectors.list_rooms_by_hostel(hostel_id)
+
+
 class RoomRenameView(generics.UpdateAPIView):
     """Rename a room (Warden/Caretaker can rename rooms from sequential to custom names)."""
     permission_classes = [IsWardenOrCaretaker]
@@ -643,23 +656,48 @@ class RoomChangeListCreateView(generics.ListCreateAPIView):
     serializer_class = RoomAllocationChangeSerializer
 
     def get_queryset(self):
-        """Get room changes for user or all if staff."""
+        """Get room changes for user or all if staff/warden/caretaker."""
         user = self.request.user
-        if user.is_staff:
+        if user.is_staff or user.is_superuser or selectors.is_user_warden_or_caretaker(user):
             return selectors.get_all_room_changes()
         return selectors.get_student_room_changes(user)
 
     def perform_create(self, serializer):
-        """Request room change via service."""
+        """Request room change via service.
+        
+        Auto-detects the student's current room from their active allotment.
+        The frontend only needs to send: requested_room (ID) and reason.
+        """
         try:
+            # Resolve Student object from User
+            student = selectors.get_student(self.request.user.id)
+            if not student:
+                from rest_framework.exceptions import ValidationError
+                raise ValidationError({"detail": "Only students can request room changes."})
+
+            # Auto-detect current room from active allotment
+            current_allotment = selectors.get_active_allotment_by_student(student)
+            if not current_allotment or not current_allotment.room:
+                from rest_framework.exceptions import ValidationError
+                raise ValidationError({"detail": "You must have an active room allotment to request a room change."})
+
+            current_room = current_allotment.room
+
+            # Get requested_room from serializer data
+            requested_room = serializer.validated_data.get('requested_room')
+            if not requested_room:
+                from rest_framework.exceptions import ValidationError
+                raise ValidationError({"detail": "Please select a room to move to."})
+
             services.request_room_change(
-                student=self.request.user,
-                current_room=serializer.validated_data['current_room'],
-                requested_room=serializer.validated_data['requested_room'],
+                student=student,
+                current_room=current_room,
+                requested_room=requested_room,
                 reason=serializer.validated_data['reason']
             )
         except (RoomChangeEligibilityError, HostelManagementException) as e:
-            return Response({'detail': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+            from rest_framework.exceptions import ValidationError
+            raise ValidationError({"detail": str(e)})
 
 
 class RoomChangeRetrieveView(generics.RetrieveAPIView):
@@ -681,6 +719,12 @@ class RoomChangeApproveView(generics.UpdateAPIView):
         """Get room change by ID."""
         return get_object_or_404(RoomAllocationChange, pk=self.kwargs['pk'])
 
+    def update(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        self.perform_update(serializer)
+        return Response({"detail": "Room change approved successfully."}, status=status.HTTP_200_OK)
+
     def perform_update(self, serializer):
         """Approve room change via service."""
         room_change = self.get_object()
@@ -691,7 +735,8 @@ class RoomChangeApproveView(generics.UpdateAPIView):
                 remarks=serializer.validated_data.get('remarks')
             )
         except (RoomChangeEligibilityError, DualApprovalError, AllotmentCapacityError, HostelManagementException) as e:
-            return Response({'detail': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+            from rest_framework.exceptions import ValidationError
+            raise ValidationError({"detail": str(e)})
 
 
 class RoomChangeRejectView(generics.UpdateAPIView):
@@ -703,13 +748,24 @@ class RoomChangeRejectView(generics.UpdateAPIView):
         """Get room change by ID."""
         return get_object_or_404(RoomAllocationChange, pk=self.kwargs['pk'])
 
+    def update(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        self.perform_update(serializer)
+        return Response({"detail": "Room change rejected successfully."}, status=status.HTTP_200_OK)
+
     def perform_update(self, serializer):
         """Reject room change via service."""
         room_change = self.get_object()
-        services.reject_room_change(
-            change_id=room_change.id,
-            rejection_reason=serializer.validated_data.get('rejection_reason', '')
-        )
+        rejection_reason = serializer.validated_data.get('remarks', '')
+        try:
+            services.reject_room_change(
+                change_id=room_change.id,
+                rejection_reason=rejection_reason
+            )
+        except HostelManagementException as e:
+            from rest_framework.exceptions import ValidationError
+            raise ValidationError({"detail": str(e)})
 
 
 # ══════════════════════════════════════════════════════════════
