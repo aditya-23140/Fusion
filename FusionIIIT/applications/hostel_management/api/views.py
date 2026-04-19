@@ -23,13 +23,14 @@ Supports Workflows:
 - HM-WF-113: Extended Stay
 """
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from django.utils import timezone
 from rest_framework import generics, status, parsers
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated, IsAdminUser, BasePermission
 from rest_framework.pagination import PageNumberPagination
 from django.shortcuts import get_object_or_404
+from django.db.models import Sum, Count
 from django.contrib.auth.models import User
 from applications.globals.models import Staff
 from applications.globals.models import Faculty
@@ -39,7 +40,7 @@ from applications.hostel_management.models import (
     HostelFine, StaffSchedule, HostelInventory, GuestRoomBooking,
     HostelNoticeBoard,
     Hostel, Room, RoomAllotment, HostelStaffAssignment,
-    ComplaintStatusChoices, ComplaintCategoryChoices, StaffRoleChoices
+    ComplaintStatusChoices, ComplaintCategoryChoices, StaffRoleChoices, FineStatusChoices
 )
 from . import serializers
 from .serializers import (
@@ -784,30 +785,148 @@ class RoomChangeRejectView(generics.UpdateAPIView):
 # ══════════════════════════════════════════════════════════════
 
 class FineListCreateView(generics.ListCreateAPIView):
-    """List fines or impose a new fine."""
+    """
+    List fines or impose a new fine.
+    - Student: view own
+    - Caretaker: view assigned hostel
+    - Warden: view assigned hostel
+    - Admin: view all
+    """
     permission_classes = [IsAuthenticated]
-    serializer_class = HostelFineSerializer
+    
+    def get_serializer_class(self):
+        if self.request.method == 'POST':
+            return serializers.ImposeFineSerializer
+        return serializers.HostelFineSerializer
 
     def get_queryset(self):
-        """Get fines for user or all if staff."""
+        """Implement role-based scoping (BR-HM-012)."""
         user = self.request.user
-        if user.is_staff:
-            return selectors.get_all_fines()
-        return selectors.get_student_fines(user)
+        
+        # Super Admin
+        if user.is_superuser:
+            return selectors.list_hostel_fines()
+            
+        # Warden/Caretaker
+        if selectors.is_user_warden_or_caretaker(user):
+            assigned_hostels = selectors.list_assigned_hostels(user)
+            hall_ids = assigned_hostels.values_list('hall_id', flat=True)
+            return selectors.list_hostel_fines(hall_ids=hall_ids)
+            
+        # Student
+        return selectors.list_student_fines(user)
 
     def perform_create(self, serializer):
-        """Impose fine via service."""
+        """Impose fine via service (HM-UC-016)."""
+        # Validate student exists
+        student_id = serializer.validated_data['student_id']
+        student = selectors.get_student_by_roll(student_id)
+        if not student:
+            from rest_framework.exceptions import ValidationError
+            raise ValidationError({"student_id": f"Student with ID {student_id} not found."})
+
+        # Validate Caretaker is assigned to this student's hostel
+        # BR-HM: Caretaker can only impose fines in their ASSIGNED hostel
+        # Get active allotment to find student's hostel
+        allotment = selectors.get_active_allotment_by_student(student)
+        if not allotment:
+            from rest_framework.exceptions import ValidationError
+            raise ValidationError({"detail": "Student is not currently allotted to any hostel."})
+            
+        hostel = allotment.hostel
+        user = self.request.user
+        
+        if not user.is_superuser:
+            assigned_hostels = selectors.list_assigned_hostels(user)
+            if not assigned_hostels.filter(hall_id=hostel.hall_id).exists():
+                from rest_framework.exceptions import PermissionDenied
+                raise PermissionDenied("You can only impose fines on students in your assigned hostel.")
+
         try:
             services.impose_fine(
-                student_id=serializer.validated_data['student'].id,
-                fine_type=serializer.validated_data['fine_type'],
+                student=student,
+                hostel=hostel,
+                imposed_by=user,
+                category=serializer.validated_data['category'],
                 amount=serializer.validated_data['amount'],
                 reason=serializer.validated_data['reason'],
-                due_date=serializer.validated_data['due_date'],
-                issued_by=self.request.user
+                evidence=serializer.validated_data.get('evidence'),
+                extra_details=serializer.validated_data.get('extra_fields')
             )
-        except (FineValidationError, HostelManagementException) as e:
-            return Response({'detail': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        except services.FineValidationError as e:
+            from rest_framework.exceptions import ValidationError
+            raise ValidationError({"detail": str(e)})
+
+
+class RepeatOffendersView(generics.ListAPIView):
+    """
+    Warden analytical view to identify repeat offenders.
+    Supports in-UI threshold adjustment.
+    """
+    permission_classes = [IsWardenOrCaretaker | IsHostelSuperAdmin]
+    serializer_class = serializers.StudentMinimalSerializer # Need to create or use existing
+
+    def get_queryset(self):
+        user = self.request.user
+        threshold = self.request.query_params.get('threshold', 3)
+        try:
+            threshold = int(threshold)
+        except ValueError:
+            threshold = 3
+            
+        hall_ids = None
+        if not user.is_superuser:
+            assigned_hostels = selectors.list_assigned_hostels(user)
+            hall_ids = assigned_hostels.values_list('hall_id', flat=True)
+            
+        return selectors.list_repeat_offenders(hall_ids=hall_ids, threshold=threshold)
+
+    def list(self, request, *args, **kwargs):
+        queryset = self.get_queryset()
+        # Return custom data including counts
+        data = [{
+            'id': s.id.id,
+            'name': s.id.user.get_full_name(),
+            'unpaid_count': s.unpaid_count,
+            'total_unpaid_amount': s.total_unpaid_amount,
+            'hostel': s.room_allotments.filter(is_active=True).first().hostel.name if s.room_allotments.filter(is_active=True).exists() else "N/A"
+        } for s in queryset]
+        return Response(data)
+
+
+class FineReportView(generics.GenericAPIView):
+    """
+    Warden dashboard statistics and trends for fines.
+    """
+    permission_classes = [IsWardenOrCaretaker | IsHostelSuperAdmin]
+
+    def get_hall_ids(self, user):
+        if user.is_superuser:
+            return None
+        assigned_hostels = selectors.list_assigned_hostels(user)
+        return assigned_hostels.values_list('hall_id', flat=True)
+
+    def get(self, request, *args, **kwargs):
+        user = request.user
+        hall_ids = self.get_hall_ids(user)
+        report_data = selectors.get_fine_report_data(hall_ids=hall_ids)
+        return Response(report_data)
+
+
+class StudentDetailByRollView(generics.GenericAPIView):
+    """Fetch student detail by roll number (for auto-fetch features)."""
+    permission_classes = [IsWardenOrCaretaker | IsHostelSuperAdmin]
+
+    def get(self, request, roll_number, *args, **kwargs):
+        student = selectors.get_student_by_roll(roll_number)
+        if not student:
+            return Response({"error": "Student not found"}, status=status.HTTP_404_NOT_FOUND)
+            
+        return Response({
+            "name": f"{student.id.user.first_name} {student.id.user.last_name}",
+            "roll_number": student.id.id,
+            "hostel": student.room_allotments.filter(is_active=True).first().hostel.name if student.room_allotments.filter(is_active=True).exists() else "N/A"
+        })
 
 
 class FineRetrieveView(generics.RetrieveAPIView):
@@ -820,22 +939,16 @@ class FineRetrieveView(generics.RetrieveAPIView):
         return get_object_or_404(HostelFine, pk=self.kwargs['pk'])
 
 
-class FineMarkPaidView(generics.UpdateAPIView):
-    """Mark fine as paid."""
-    permission_classes = [IsAuthenticated]
-    serializer_class = HostelFinePaymentSerializer
-
-    def get_object(self):
-        """Get fine by ID."""
-        return get_object_or_404(HostelFine, pk=self.kwargs['pk'])
-
-    def perform_update(self, serializer):
-        """Mark fine as paid via service."""
-        fine = self.get_object()
-        services.mark_fine_paid(
-            fine_id=fine.id,
-            paid_date=serializer.validated_data.get('paid_date')
-        )
+class FineMarkPaidView(generics.GenericAPIView):
+    """Mark fine as paid (HM-UC-017)."""
+    permission_classes = [IsWardenOrCaretaker | IsHostelSuperAdmin]
+    
+    def post(self, request, pk, *args, **kwargs):
+        try:
+            fine = services.mark_fine_as_paid(fine_id=pk, user=request.user)
+            return Response(serializers.HostelFineSerializer(fine).data, status=status.HTTP_200_OK)
+        except HostelManagementException as e:
+            return Response({'detail': str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
 
 class FineWaiveView(generics.UpdateAPIView):

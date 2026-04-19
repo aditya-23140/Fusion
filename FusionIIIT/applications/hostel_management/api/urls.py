@@ -87,6 +87,9 @@ room_change_patterns = [
 # ══════════════════════════════════════════════════════════════
 fine_patterns = [
     path('', views.FineListCreateView.as_view(), name='fine-list-create'),
+    path('repeat-offenders/', views.RepeatOffendersView.as_view(), name='fine-repeat-offenders'),
+    path('report/', views.FineReportView.as_view(), name='fine-report'),
+    path('student/<str:roll_number>/', views.StudentDetailByRollView.as_view(), name='student-detail-by-roll'),
     path('<int:pk>/', views.FineRetrieveView.as_view(), name='fine-detail'),
     path('<int:pk>/mark-paid/', views.FineMarkPaidView.as_view(), name='fine-mark-paid'),
     path('<int:pk>/waive/', views.FineWaiveView.as_view(), name='fine-waive'),

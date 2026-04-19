@@ -59,6 +59,14 @@ class FineStatusChoices(models.TextChoices):
     CANCELLED = "cancelled", "Cancelled"
 
 
+class FineCategoryChoices(models.TextChoices):
+    """Hostel fine violation categories."""
+    RULE_VIOLATION = "HostelRuleViolation", "Hostel Rule Violation"
+    PROPERTY_DAMAGE = "PropertyDamage", "Property Damage"
+    ATTENDANCE_VIOLATION = "AttendanceViolation", "Attendance Violation"
+    ROOM_STANDARDS = "RoomStandardsViolation", "Room Standards Violation"
+
+
 class RoomChangeStatusChoices(models.TextChoices):
     """Room change request status."""
     PENDING = "pending", "Pending"
@@ -885,42 +893,42 @@ class GuestRoom(models.Model):
 
     
 
-class HostelFine(models.Model):
-    """Fine management model with BR-HM-013 enforcement."""
-    FINE_TYPE_CHOICES = [
-        ('damage', 'Damage'),
-        ('late_fee', 'Late Fee'),
-        ('violation', 'Violation'),
-        ('other', 'Other'),
-    ]
+# class HostelFine(models.Model):
+#     """Fine management model with BR-HM-013 enforcement."""
+#     FINE_TYPE_CHOICES = [
+#         ('damage', 'Damage'),
+#         ('late_fee', 'Late Fee'),
+#         ('violation', 'Violation'),
+#         ('other', 'Other'),
+#     ]
     
-    student = models.ForeignKey(Student, on_delete=models.CASCADE, related_name='hostel_fines')
-    hostel = models.ForeignKey(Hostel, on_delete=models.CASCADE, related_name='fines')
-    student_name = models.CharField(max_length=100)
-    fine_type = models.CharField(max_length=20, choices=FINE_TYPE_CHOICES, default='other')
-    amount = models.DecimalField(max_digits=10, decimal_places=2)
-    status = models.CharField(
-        max_length=20,
-        choices=FineStatusChoices.choices,
-        default=FineStatusChoices.PENDING
-    )
-    reason = models.TextField()
-    issued_date = models.DateField(auto_now_add=True)
-    due_date = models.DateField(null=True, blank=True)
-    issued_by = models.ForeignKey(Staff, on_delete=models.SET_NULL, null=True, blank=True, related_name='fines_issued')
-    paid_date = models.DateField(null=True, blank=True)
-    waived_by = models.ForeignKey(Staff, on_delete=models.SET_NULL, null=True, blank=True, related_name='fines_waived')
-    waive_reason = models.TextField(blank=True, null=True)
-    waived_date = models.DateField(null=True, blank=True)
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
+#     student = models.ForeignKey(Student, on_delete=models.CASCADE, related_name='hostel_fines')
+#     hostel = models.ForeignKey(Hostel, on_delete=models.CASCADE, related_name='fines')
+#     student_name = models.CharField(max_length=100)
+#     fine_type = models.CharField(max_length=20, choices=FINE_TYPE_CHOICES, default='other')
+#     amount = models.DecimalField(max_digits=10, decimal_places=2)
+#     status = models.CharField(
+#         max_length=20,
+#         choices=FineStatusChoices.choices,
+#         default=FineStatusChoices.PENDING
+#     )
+#     reason = models.TextField()
+#     issued_date = models.DateField(auto_now_add=True)
+#     due_date = models.DateField(null=True, blank=True)
+#     issued_by = models.ForeignKey(Staff, on_delete=models.SET_NULL, null=True, blank=True, related_name='fines_issued')
+#     paid_date = models.DateField(null=True, blank=True)
+#     waived_by = models.ForeignKey(Staff, on_delete=models.SET_NULL, null=True, blank=True, related_name='fines_waived')
+#     waive_reason = models.TextField(blank=True, null=True)
+#     waived_date = models.DateField(null=True, blank=True)
+#     created_at = models.DateTimeField(auto_now_add=True)
+#     updated_at = models.DateTimeField(auto_now=True)
     
-    class Meta:
-        db_table = 'hostel_management_hostel_fine'
-        ordering = ['-issued_date']
+#     class Meta:
+#         db_table = 'hostel_management_hostel_fine'
+#         ordering = ['-issued_date']
 
-    def __str__(self):
-        return f"{self.student_name}'s Fine - {self.amount} - {self.status}"
+#     def __str__(self):
+#         return f"{self.student_name}'s Fine - {self.amount} - {self.status}"
     
 
 class HostelTransactionHistory(models.Model):
@@ -1132,4 +1140,57 @@ class ExtendedStayApplication(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
 
     def __str__(self):
-        return f"Extended Stay: {self.student.user.username} ({self.status})"
+        return f"Extended Stay: {self.student.user.username} ({self.status})"
+
+
+# ══════════════════════════════════════════════════════════════
+# HM-WF-105: FINE MANAGEMENT MODELS
+# ══════════════════════════════════════════════════════════════
+
+class HostelFine(models.Model):
+    """
+    Model for tracking disciplinary fines imposed on students.
+    Supports HM-WF-105: Fine Management Workflow
+    """
+    student = models.ForeignKey(Student, on_delete=models.CASCADE, related_name='fines')
+    hostel = models.ForeignKey(Hostel, on_delete=models.CASCADE, related_name='fines')
+    imposed_by = models.ForeignKey(User, on_delete=models.CASCADE, related_name='fines_imposed')
+    category = models.CharField(max_length=50, choices=FineCategoryChoices.choices)
+    amount = models.DecimalField(max_digits=10, decimal_places=2)
+    reason = models.TextField()
+    evidence = models.FileField(upload_to='hostel/fines/evidence/', null=True, blank=True)
+    status = models.CharField(max_length=20, choices=FineStatusChoices.choices, default=FineStatusChoices.PENDING)
+    imposed_date = models.DateTimeField(auto_now_add=True)
+    paid_date = models.DateTimeField(null=True, blank=True)
+    fine_uid = models.CharField(max_length=24, unique=True)
+
+    class Meta:
+        db_table = 'hostel_management_hostelfine'
+        ordering = ['-imposed_date']
+
+    def __str__(self):
+        return f"Fine {self.fine_uid} - {self.student.user.username} (₹{self.amount})"
+
+    def save(self, *args, **kwargs):
+        if not self.fine_uid:
+            # Generate unique ID: FINE-HALL_ID-YYYYMM-XXXX
+            import random
+            prefix = f"FINE-{self.hostel.hall_id}-{timezone.now().strftime('%y%m')}"
+            unique_part = "".join(random.choices("0123456789", k=4))
+            self.fine_uid = f"{prefix}-{unique_part}"
+        super().save(*args, **kwargs)
+
+
+class FineExtraDetail(models.Model):
+    """
+    Extensible storage for category-specific fine details (e.g. damaged item list).
+    """
+    fine = models.ForeignKey(HostelFine, on_delete=models.CASCADE, related_name='extra_details')
+    detail_type = models.CharField(max_length=50)
+    detail_json = models.JSONField()
+
+    class Meta:
+        db_table = 'hostel_management_fineextradetail'
+
+    def __str__(self):
+        return f"Details for {self.fine.fine_uid} ({self.detail_type})"

@@ -48,8 +48,12 @@ from ..models import (
     HostelStatusChoices,
     HostelStaffAssignment,
     HostelAuditLog,
-    ComplaintHistory
+    ComplaintHistory,
+    FineCategoryChoices,
+    FineExtraDetail
 )
+from applications.academic_information.models import Student
+from applications.globals.models import Staff, Faculty
 
 
 # ══════════════════════════════════════════════════════════════
@@ -594,48 +598,60 @@ class RoomAllocationChangeApprovalSerializer(serializers.Serializer):
 # FINE SERIALIZERS (HM-WF-105)
 # ══════════════════════════════════════════════════════════════
 
+class FineExtraDetailSerializer(serializers.ModelSerializer):
+    """Serializer for category-specific fine details."""
+    class Meta:
+        model = FineExtraDetail
+        fields = ['detail_type', 'detail_json']
+
+
 class HostelFineSerializer(serializers.ModelSerializer):
-    """Read-only serializer for Fine details."""
-    student_name = serializers.CharField(source='student.id.user.username', read_only=True)
-    issued_by_name = serializers.CharField(source='issued_by.id.user.username', read_only=True, allow_null=True)
-    waived_by_name = serializers.CharField(source='waived_by.id.user.username', read_only=True, allow_null=True)
+    """Read-only serializer for HostelFine with nested details."""
+    student_name = serializers.CharField(source='student.id.user.get_full_name', read_only=True)
+    student_roll = serializers.CharField(source='student.id.id', read_only=True)
+    imposed_by_name = serializers.CharField(source='imposed_by.get_full_name', read_only=True)
+    hostel_name = serializers.CharField(source='hostel.name', read_only=True)
+    extra_details = FineExtraDetailSerializer(many=True, read_only=True)
     
     class Meta:
         model = HostelFine
         fields = [
-            'id', 'student', 'student_name', 'hall', 'fine_type', 'amount',
-            'reason', 'status', 'issued_date', 'due_date', 'paid_date',
-            'issued_by', 'issued_by_name', 'waived_by', 'waived_by_name',
-            'waive_reason', 'created_at', 'updated_at'
+            'id', 'fine_uid', 'student', 'student_name', 'student_roll',
+            'hostel', 'hostel_name', 'category', 'amount', 'reason',
+            'evidence', 'status', 'imposed_date', 'paid_date',
+            'imposed_by', 'imposed_by_name', 'extra_details'
         ]
         read_only_fields = fields
 
 
-class HostelFineCreateSerializer(serializers.ModelSerializer):
-    """Create serializer for Fine with field-level validation."""
+class StudentMinimalSerializer(serializers.ModelSerializer):
+    """Minimal student serializer for analytical views."""
+    name = serializers.CharField(source='id.user.get_full_name', read_only=True)
+    roll_number = serializers.CharField(source='id.id', read_only=True)
+    
+    class Meta:
+        model = Student
+        fields = ['id', 'name', 'roll_number']
+        read_only_fields = fields
+
+
+class ImposeFineSerializer(serializers.ModelSerializer):
+    """Serializer for imposing a new fine (HM-UC-016)."""
+    student_id = serializers.CharField(write_only=True)
+    extra_fields = serializers.JSONField(required=False, write_only=True)
     
     class Meta:
         model = HostelFine
-        fields = ['fine_type', 'amount', 'reason', 'due_date']
+        fields = ['student_id', 'category', 'amount', 'reason', 'evidence', 'extra_fields']
     
     def validate_amount(self, value):
-        """Validate amount is positive."""
         if value <= 0:
-            raise serializers.ValidationError("Fine amount must be greater than 0.")
-        if value > 100000:
-            raise serializers.ValidationError("Fine amount exceeds maximum limit.")
+            raise serializers.ValidationError("Fine amount must be greater than zero (BR-HM-013.a).")
         return value
-    
+
     def validate_reason(self, value):
-        """Validate reason length."""
-        if not value or len(value.strip()) < 10:
-            raise serializers.ValidationError("Reason must be at least 10 characters.")
-        return value
-    
-    def validate_due_date(self, value):
-        """Validate due_date is in future."""
-        if value < timezone.now().date():
-            raise serializers.ValidationError("Due date must be in the future.")
+        if not value or not value.strip():
+            raise serializers.ValidationError("Reason for fine cannot be empty (BR-HM-013.c).")
         return value
 
 

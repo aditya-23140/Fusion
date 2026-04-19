@@ -11,7 +11,9 @@ Query patterns:
 - count_*: Returns count of objects
 """
 
+from django.db import transaction, models
 from django.db.models import Q, Count, F, Sum
+from django.db.models.functions import TruncMonth
 from django.utils import timezone
 from datetime import timedelta
 
@@ -30,6 +32,11 @@ from .models import (
 )
 from applications.academic_information.models import Student
 from applications.globals.models import Staff, Faculty
+
+
+def get_student_by_roll(roll_number):
+    """Fetch student details by roll number."""
+    return Student.objects.filter(id__id=roll_number).select_related('id__user').first()
 
 
 # ══════════════════════════════════════════════════════════════
@@ -131,7 +138,8 @@ def get_student(user):
     """
     if hasattr(user, 'id'):
         return Student.objects.filter(id__user=user).first()
-    return Student.objects.filter(id__user_id=user).first()
+    # If a string/integer ID is passed
+    return Student.objects.filter(id__user_id=user).first() or Student.objects.filter(id__id=user).first()
 
 
 def get_staff(user):
@@ -1005,6 +1013,95 @@ def get_worker_report(report_id):
     """Get a specific worker report."""
     return WorkerReport.objects.filter(id=report_id).first()
 
+@transaction.atomic
+def delete_worker_report(report_id):
+    report = WorkerReport.objects.filter(id=report_id).first()
+    if report:
+        report.delete()
+        return True
+    return False
+
+
+# ══════════════════════════════════════════════════════════════
+# HM-WF-105: FINE MANAGEMENT QUERIES
+# ══════════════════════════════════════════════════════════════
+
+def list_student_fines(user):
+    """List all fines for a specific student."""
+    student = get_student(user)
+    if not student:
+        return HostelFine.objects.none()
+    return HostelFine.objects.filter(student=student).prefetch_related('extra_details')
+
+
+def list_hostel_fines(hall_ids=None):
+    """List fines for specific hostels or all if none provided."""
+    queryset = HostelFine.objects.all().select_related('student__user', 'hostel', 'imposed_by')
+    if hall_ids is not None:
+        queryset = queryset.filter(hostel__hall_id__in=hall_ids)
+    return queryset.prefetch_related('extra_details')
+
+
+def get_fine_by_id(fine_id):
+    """Get a single fine by ID with details."""
+    return HostelFine.objects.filter(id=fine_id).prefetch_related('extra_details').first()
+
+
+def list_repeat_offenders(hall_ids=None, threshold=3):
+    """
+    Find students with unpaid fine counts exceeding threshold.
+    Returns list of dictionaries with student info and fine metrics.
+    """
+    queryset = Student.objects.filter(fines__status=FineStatusChoices.PENDING)
+    
+    if hall_ids is not None:
+        queryset = queryset.filter(fines__hostel__hall_id__in=hall_ids)
+    
+    return queryset.annotate(
+        unpaid_count=Count('fines', filter=Q(fines__status=FineStatusChoices.PENDING)),
+        total_unpaid_amount=Sum('fines__amount', filter=Q(fines__status=FineStatusChoices.PENDING))
+    ).filter(unpaid_count__gte=threshold).order_by('-unpaid_count')
+
+
+def get_fine_report_data(hall_ids=None):
+    """Generate summary data for fine reports."""
+    fines = list_hostel_fines(hall_ids=hall_ids)
+    
+    # Summary stats
+    summary = {
+        'total_fines': fines.count(),
+        'total_amount': float(fines.aggregate(Sum('amount'))['amount__sum'] or 0),
+        'unpaid_fines': fines.filter(status=FineStatusChoices.PENDING).count(),
+        'unpaid_amount': float(fines.filter(status=FineStatusChoices.PENDING).aggregate(Sum('amount'))['amount__sum'] or 0),
+        'resolved_today': fines.filter(paid_date__date=timezone.now().date()).count()
+    }
+    
+    # Category breakdown
+    categories = list(fines.values('category').annotate(
+        count=Count('id'), 
+        total=Sum('amount')
+    ).order_by('-count'))
+    
+    # Trends (Last 6 months)
+    six_months_ago = timezone.now() - timedelta(days=180)
+    # Using TruncMonth for DB-agnostic grouping
+    trends = list(fines.filter(imposed_date__gte=six_months_ago)
+        .annotate(month=TruncMonth('imposed_date'))
+        .values('month')
+        .annotate(total_amount=Sum('amount'))
+        .order_by('month'))
+    
+    # Format months for readability
+    for trend in trends:
+        if trend['month']:
+            trend['month'] = trend['month'].strftime('%Y-%m')
+            
+    return {
+        'summary': summary,
+        'categories': categories,
+        'trends': trends
+    }
+
 
 def list_staff_reports(staff_id):
     """Get all reports for a staff member."""
@@ -1076,27 +1173,93 @@ def get_student_complaints(user):
     ).order_by('-created_at')
 
 
-def get_all_fines():
-    """Get all fines with optimized queries (for staff views)."""
-    return HostelFine.objects.select_related(
-        'student__id__user',
-        'issued_by__id__user',
-        'waived_by__id__user'
-    ).all().order_by('-issued_date')
-
-
-def get_student_fines(user):
-    """Get all fines for a student user."""
+def list_student_fines(user):
+    """List all fines for a specific student."""
     student = get_student(user.id)
     if not student:
         return HostelFine.objects.none()
-    return HostelFine.objects.filter(
-        student_id=student.pk
-    ).select_related(
-        'student__id__user',
-        'issued_by__id__user',
-        'waived_by__id__user'
-    ).order_by('-issued_date')
+    return HostelFine.objects.filter(student=student).select_related(
+        'student__id__user', 
+        'hostel', 
+        'imposed_by'
+    ).prefetch_related('extra_details').order_by('-imposed_date')
+
+
+def list_hostel_fines(hall_ids=None):
+    """List fines for specific hostels or all if none provided."""
+    queryset = HostelFine.objects.all().select_related(
+        'student__id__user', 
+        'hostel', 
+        'imposed_by'
+    ).prefetch_related('extra_details').order_by('-imposed_date')
+    
+    if hall_ids is not None:
+        queryset = queryset.filter(hostel__hall_id__in=hall_ids)
+    return queryset
+
+
+def get_fine_by_id(fine_id):
+    """Get a single fine by ID with details."""
+    return HostelFine.objects.filter(id=fine_id).select_related(
+        'student__id__user', 
+        'hostel', 
+        'imposed_by'
+    ).prefetch_related('extra_details').first()
+
+
+def list_repeat_offenders(hall_ids=None, threshold=3):
+    """Find students with multiple unpaid fines."""
+    queryset = Student.objects.filter(fines__status=FineStatusChoices.PENDING)
+    
+    if hall_ids is not None:
+        queryset = queryset.filter(fines__hostel__hall_id__in=hall_ids)
+    
+    offenders = queryset.annotate(
+        unpaid_count=Count('fines', filter=Q(fines__status=FineStatusChoices.PENDING)),
+        total_unpaid_amount=Sum('fines__amount', filter=Q(fines__status=FineStatusChoices.PENDING))
+    ).filter(unpaid_count__gte=threshold).order_by('-unpaid_count').select_related('id__user')
+    
+    return offenders
+
+
+def get_fine_report_data(hall_ids=None):
+    """Generate summary data for fine reports."""
+    fines = list_hostel_fines(hall_ids=hall_ids)
+    
+    # Summary stats
+    summary = {
+        'total_fines': fines.count(),
+        'total_amount': float(fines.aggregate(Sum('amount'))['amount__sum'] or 0),
+        'unpaid_fines': fines.filter(status=FineStatusChoices.PENDING).count(),
+        'unpaid_amount': float(fines.filter(status=FineStatusChoices.PENDING).aggregate(Sum('amount'))['amount__sum'] or 0),
+        'resolved_today': fines.filter(paid_date__date=timezone.now().date()).count()
+    }
+    
+    # Category breakdown
+    categories = list(fines.values('category').annotate(
+        count=Count('id'), 
+        total=Sum('amount')
+    ).order_by('-count'))
+    
+    # Trends (Last 6 months)
+    six_months_ago = timezone.now() - timedelta(days=180)
+    # Using TruncMonth for DB-agnostic grouping
+    trends = list(fines.filter(imposed_date__gte=six_months_ago)
+        .annotate(month=TruncMonth('imposed_date'))
+        .values('month')
+        .annotate(total_amount=Sum('amount'))
+        .order_by('month'))
+    
+    # Format months for readability
+    for trend in trends:
+        if trend['month']:
+            trend['month'] = trend['month'].strftime('%Y-%m')
+            
+    return {
+        'summary': summary,
+        'categories': categories,
+        'trends': trends
+    }
 
 
 def get_all_schedules():

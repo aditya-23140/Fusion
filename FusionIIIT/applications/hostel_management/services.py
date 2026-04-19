@@ -21,7 +21,7 @@ from .models import (
     StaffRoleChoices, RoomSetupStatusChoices,
     ComplaintHistory, ComplaintCategoryChoices, ComplaintStatusChoices,
     LeaveStatusChoices, FineStatusChoices, BookingStatusChoices,
-    AllocationChangeStatusChoices
+    AllocationChangeStatusChoices, FineCategoryChoices, FineExtraDetail
 )
 from notifications.signals import notify
 from django.db import transaction
@@ -55,6 +55,11 @@ class LeaveJustificationError(HostelManagementException):
 
 class LeaveAuthorityError(HostelManagementException):
     """Raised when leave decision maker lacks authority (BR-HM-104)."""
+    pass
+
+
+class FineValidationError(HostelManagementException):
+    """Raised when fine parameters violate business rules (BR-HM-013)."""
     pass
 
 
@@ -1662,3 +1667,108 @@ def delete_room_allotment(allotment_id):
     allotment.delete()
     
     return True
+
+
+# ══════════════════════════════════════════════════════════════
+# HM-WF-105: FINE MANAGEMENT SERVICES
+# ══════════════════════════════════════════════════════════════
+
+def validate_fine_evidence(file):
+    """
+    Validate fine evidence document (BR-HM-022).
+    - Max 5MB
+    - Allowed Types: JPEG, PNG, PDF
+    """
+    if not file:
+        return True
+    
+    # 5MB Limit
+    if file.size > 5 * 1024 * 1024:
+        raise FineValidationError("Evidence file size exceeds 5MB limit.")
+    
+    # Type Check
+    ext = file.name.split('.')[-1].lower()
+    if ext not in ['jpg', 'jpeg', 'png', 'pdf']:
+        raise FineValidationError("Unsupported evidence file type. Use JPG, PNG or PDF.")
+    
+    return True
+
+
+@transaction.atomic
+def impose_fine(student, hostel, imposed_by, category, amount, reason, evidence=None, extra_details=None):
+    """
+    Impose a disciplinary fine on a student (HM-UC-016).
+    Enforces:
+    - BR-HM-013.a: Amount must be > 0
+    - BR-HM-013.b: Category must be valid
+    - BR-HM-013.c: Reason must not be empty
+    - BR-HM-014.a: Initial status is always 'pending'
+    - BR-HM-022: Evidence validation
+    """
+    # Validation (BR-HM-013)
+    if amount <= 0:
+        raise FineValidationError("Fine amount must be greater than zero.")
+    
+    if not category or category not in FineCategoryChoices.values:
+        raise FineValidationError("Invalid violation category.")
+    
+    if not reason or not reason.strip():
+        raise FineValidationError("Reason for fine must be provided.")
+    
+    # Evidence Validation (BR-HM-022)
+    if evidence:
+        validate_fine_evidence(evidence)
+    
+    # Create Fine
+    fine = HostelFine.objects.create(
+        student=student,
+        hostel=hostel,
+        imposed_by=imposed_by,
+        category=category,
+        amount=amount,
+        reason=reason,
+        evidence=evidence,
+        status=FineStatusChoices.PENDING
+    )
+    
+    # Save Extra Details
+    if extra_details:
+        for detail_type, content in extra_details.items():
+            FineExtraDetail.objects.create(
+                fine=fine,
+                detail_type=detail_type,
+                detail_json=content
+            )
+            
+    # Notify Student (Optional requirement based on implementation plan)
+    try:
+        notify.send(
+            imposed_by,
+            recipient=student.id.user,
+            verb="imposed a fine",
+            target=fine,
+            description=f"A fine of ₹{amount} has been imposed for {category}."
+        )
+    except Exception as e:
+        print(f"Notification failed: {e}")
+        
+    return fine
+
+
+@transaction.atomic
+def mark_fine_as_paid(fine_id, user):
+    """
+    Mark a fine as paid (HM-UC-017).
+    """
+    fine = HostelFine.objects.select_for_update().filter(id=fine_id).first()
+    if not fine:
+        raise HostelManagementException("Fine record not found.")
+        
+    if fine.status == FineStatusChoices.PAID:
+        return fine
+        
+    fine.status = FineStatusChoices.PAID
+    fine.paid_date = timezone.now()
+    fine.save()
+    
+    return fine
