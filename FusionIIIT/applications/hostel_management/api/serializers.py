@@ -47,7 +47,8 @@ from ..models import (
     StaffRoleChoices,
     HostelStatusChoices,
     HostelStaffAssignment,
-    HostelAuditLog
+    HostelAuditLog,
+    ComplaintHistory
 )
 
 
@@ -422,40 +423,46 @@ class LeaveRequestDecisionSerializer(serializers.Serializer):
 # COMPLAINT SERIALIZERS (HM-WF-102)
 # ══════════════════════════════════════════════════════════════
 
+class ComplaintHistorySerializer(serializers.ModelSerializer):
+    """Timeline history for complaint status changes."""
+    changed_by_name = serializers.CharField(source='changed_by.get_full_name', read_only=True)
+    
+    class Meta:
+        model = ComplaintHistory
+        fields = [
+            'id', 'old_status', 'new_status', 'remarks', 
+            'changed_by', 'changed_by_name', 'timestamp'
+        ]
+        read_only_fields = fields
+
+
 class HostelComplaintSerializer(serializers.ModelSerializer):
-    """Read-only serializer for Complaint details."""
-    student_name = serializers.CharField(source='student.id.user.username', read_only=True)
-    assigned_to_name = serializers.CharField(source='assigned_to.id.user.username', read_only=True, allow_null=True)
-    warden_name = serializers.CharField(source='escalated_to.id.user.username', read_only=True, allow_null=True)
+    """Read-only serializer for Complaint details with history."""
+    student_name = serializers.CharField(source='student.id.user.get_full_name', read_only=True)
+    assigned_to_name = serializers.CharField(source='assigned_to_user.get_full_name', read_only=True, allow_null=True)
+    history = ComplaintHistorySerializer(many=True, read_only=True)
     
     class Meta:
         model = HostelComplaint
         fields = [
-            'id', 'student', 'student_name', 'hall', 'category', 'priority',
-            'title', 'description', 'location', 'status', 'assigned_to',
-            'assigned_to_name', 'resolution_remarks', 'escalated_to_warden',
-            'escalated_to', 'warden_name', 'created_at', 'updated_at', 'resolved_at'
+            'id', 'complaint_uid', 'student', 'student_name', 
+            'hostel', 'category', 'description', 
+            'status', 'assigned_to_user', 'assigned_to_name', 
+            'resolution_remarks', 'history', 'created_at', 'updated_at', 'resolved_at',
+            'attachments'
         ]
         read_only_fields = fields
 
 
 class HostelComplaintCreateSerializer(serializers.ModelSerializer):
-    """Create serializer for Complaint with field-level validation."""
+    """Create serializer for Complaint."""
     
     class Meta:
         model = HostelComplaint
-        fields = ['category', 'priority', 'title', 'description', 'location']
-    
-    def validate_title(self, value):
-        """Validate title length."""
-        if not value or len(value) < 5:
-            raise serializers.ValidationError("Title must be at least 5 characters.")
-        if len(value) > 255:
-            raise serializers.ValidationError("Title must not exceed 255 characters.")
-        return value
+        fields = ['category', 'description', 'attachments']
     
     def validate_description(self, value):
-        """Validate description length."""
+        """Validate description length (BR-HM-110)."""
         if not value or len(value.strip()) < 20:
             raise serializers.ValidationError("Description must be at least 20 characters.")
         return value
@@ -467,23 +474,14 @@ class HostelComplaintCreateSerializer(serializers.ModelSerializer):
         return value
 
 
-class HostelComplaintUpdateSerializer(serializers.ModelSerializer):
-    """Update serializer for Complaint status and resolution."""
-    
-    class Meta:
-        model = HostelComplaint
-        fields = ['status', 'resolution_remarks', 'priority']
-    
-    def validate_resolution_remarks(self, value):
-        """Validate resolution remarks if status is RESOLVED."""
-        if value and len(value.strip()) < 10:
-            raise serializers.ValidationError("Resolution notes must be at least 10 characters.")
-        return value
+class HostelComplaintResolveSerializer(serializers.Serializer):
+    """Serializer for resolving a complaint."""
+    resolution_remarks = serializers.CharField(min_length=10, max_length=1000)
 
 
 class HostelComplaintEscalateSerializer(serializers.Serializer):
     """Serializer for escalating complaint to warden."""
-    reason = serializers.CharField(max_length=500)
+    reason = serializers.CharField(min_length=10, max_length=500)
 
 
 # ══════════════════════════════════════════════════════════════

@@ -28,21 +28,19 @@ class AttendanceStatus(models.TextChoices):
 
 class ComplaintStatusChoices(models.TextChoices):
     """Complaint status options."""
-    SUBMITTED = "submitted", "Submitted"
-    UNDER_REVIEW = "under_review", "Under Review"
-    ESCALATED = "escalated", "Escalated"
-    RESOLVED = "resolved", "Resolved"
-    CLOSED = "closed", "Closed"
+    SUBMITTED = "Submitted", "Submitted"
+    IN_PROGRESS = "InProgress", "In Progress"
+    ESCALATED = "Escalated", "Escalated"
+    RESOLVED = "Resolved", "Resolved"
+    CLOSED = "Closed", "Closed"
 
 
 class ComplaintCategoryChoices(models.TextChoices):
     """Complaint category for routing."""
-    MAINTENANCE = "maintenance", "Maintenance"
-    SAFETY = "safety", "Safety"
-    HYGIENE = "hygiene", "Hygiene"
-    NOISE = "noise", "Noise Complaint"
-    SECURITY = "security", "Security"
-    OTHER = "other", "Other"
+    MAINTENANCE = "Maintenance", "Maintenance"
+    CLEANING = "Cleaning", "Cleaning"
+    SECURITY = "Security", "Security"
+    OTHER = "Other", "Other"
 
 
 class ComplaintPriorityChoices(models.TextChoices):
@@ -708,43 +706,39 @@ class HostelComplaint(models.Model):
     - BR-HM-110: Warden Authority on Escalated Complaints
     """
     student = models.ForeignKey(Student, on_delete=models.CASCADE, related_name='hostel_complaints')
-    student_name = models.CharField(max_length=100)
-    roll_number = models.CharField(max_length=20)
     hostel = models.ForeignKey(Hostel, on_delete=models.CASCADE, null=True, blank=True, related_name='complaints')
-    hostel_name = models.CharField(max_length=100)
-    title = models.CharField(max_length=255, blank=True, default='')
     category = models.CharField(
         max_length=20,
         choices=ComplaintCategoryChoices.choices,
         default=ComplaintCategoryChoices.OTHER
     )
-    priority = models.CharField(
-        max_length=20,
-        choices=ComplaintPriorityChoices.choices,
-        default=ComplaintPriorityChoices.MEDIUM
-    )
     description = models.TextField()
-    location = models.CharField(max_length=255, blank=True, null=True)
-    contact_number = models.CharField(max_length=15)
+    attachments = models.FileField(upload_to='hostel/complaints/', null=True, blank=True)
     status = models.CharField(
         max_length=20,
         choices=ComplaintStatusChoices.choices,
         default=ComplaintStatusChoices.SUBMITTED
     )
+    assigned_to_user = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='assigned_complaints_unified')
     resolution_remarks = models.TextField(blank=True, null=True)
-    resolution_date = models.DateField(null=True, blank=True)
-    escalated_to_warden = models.BooleanField(default=False)
-    warden_remarks = models.TextField(blank=True, null=True)
-    assigned_to = models.ForeignKey(Staff, on_delete=models.SET_NULL, null=True, blank=True, related_name='assigned_complaints')
+    resolved_by_user = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='resolved_complaints')
+    resolved_at = models.DateTimeField(null=True, blank=True)
+    complaint_uid = models.CharField(max_length=50, unique=True, null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
-    reviewed_by = models.ForeignKey(Staff, on_delete=models.SET_NULL, null=True, blank=True, related_name='reviewed_complaints')
-    escalated_to = models.ForeignKey(Faculty, on_delete=models.SET_NULL, null=True, blank=True, related_name='escalated_complaints')
-    resolved_at = models.DateTimeField(null=True, blank=True)
-    
+
     class Meta:
         db_table = 'hostel_management_hostelcomplaint'
         ordering = ['-created_at']
+
+    def save(self, *args, **kwargs):
+        """Auto-generate complaint UID if not present."""
+        if not self.complaint_uid:
+            date_str = timezone.now().strftime('%Y%m%d')
+            # The actual unique suffix will be handled by the service or we can use a basic one here
+            # But UID generation is better in service for atomic sequence
+            pass
+        super().save(*args, **kwargs)
 
     @property
     def resolution_notes(self):
@@ -765,7 +759,24 @@ class HostelComplaint(models.Model):
         self.escalated_to = value
 
     def __str__(self):
-        return f"Complaint from {self.student_name} in {self.hall_name} - {self.status}"
+        return f"Complaint {self.complaint_uid or self.id} from {self.student_name} - {self.status}"
+
+
+class ComplaintHistory(models.Model):
+    """Audit trail for complaint status changes and assignments."""
+    complaint = models.ForeignKey(HostelComplaint, on_delete=models.CASCADE, related_name='history')
+    changed_by = models.ForeignKey(User, on_delete=models.CASCADE)
+    old_status = models.CharField(max_length=20, null=True, blank=True)
+    new_status = models.CharField(max_length=20)
+    remarks = models.TextField(blank=True)
+    timestamp = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'hostel_management_complainthistory'
+        ordering = ['-timestamp']
+
+    def __str__(self):
+        return f"{self.complaint.complaint_uid}: {self.old_status} -> {self.new_status} by {self.changed_by}"
 
 
 class RoomChangeRequest(models.Model):

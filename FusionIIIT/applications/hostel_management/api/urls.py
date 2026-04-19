@@ -65,10 +65,11 @@ leave_patterns = [
 # ══════════════════════════════════════════════════════════════
 complaint_patterns = [
     path('', views.ComplaintListCreateView.as_view(), name='complaint-list-create'),
-    path('my/', views.ComplaintMyListView.as_view(), name='complaint-my-list'),
-    path('<int:pk>/', views.ComplaintRetrieveUpdateView.as_view(), name='complaint-detail'),
-    path('<int:pk>/escalate/', views.ComplaintEscalateView.as_view(), name='complaint-escalate'),
-    path('<int:pk>/resolve/', views.ComplaintResolveView.as_view(), name='complaint-resolve'),
+    path('<int:pk>/', views.ComplaintDetailView.as_view(), name='complaint-detail'),
+    path('<int:pk>/start/', views.StartComplaintView.as_view(), name='complaint-start'),
+    path('<int:pk>/escalate/', views.EscalateComplaintView.as_view(), name='complaint-escalate'),
+    path('<int:pk>/resolve/', views.ResolveComplaintView.as_view(), name='complaint-resolve'),
+    path('report/', views.ComplaintReportView.as_view(), name='complaint-report'),
 ]
 
 # ══════════════════════════════════════════════════════════════

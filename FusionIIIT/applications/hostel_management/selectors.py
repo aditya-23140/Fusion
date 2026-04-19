@@ -102,6 +102,23 @@ def list_hostel_wardens(hall_id):
         is_active=True
     ).select_related('user')
 
+def get_hostel_warden(hall_id):
+    """Get the primary active warden for a hostel."""
+    return list_hostel_wardens(hall_id).first()
+
+def list_hostel_caretakers(hall_id):
+    """Get active caretakers for a hostel."""
+    from .models import StaffRoleChoices
+    return HostelStaffAssignment.objects.filter(
+        hostel__hall_id=hall_id,
+        role=StaffRoleChoices.CARETAKER,
+        is_active=True
+    ).select_related('user')
+
+def get_hostel_caretaker(hall_id):
+    """Get the primary active caretaker for a hostel."""
+    return list_hostel_caretakers(hall_id).first()
+
 
 # ══════════════════════════════════════════════════════════════
 # STUDENT & USER QUERIES
@@ -181,6 +198,15 @@ def is_user_warden_or_caretaker(user):
     return is_user_warden(user) or is_user_caretaker(user)
 
 
+def list_user_staff_assignments(user, role=None):
+    """Get all staff assignments for a specific user."""
+    from .models import HostelStaffAssignment
+    queryset = HostelStaffAssignment.objects.filter(user=user, is_active=True)
+    if role:
+        queryset = queryset.filter(role=role)
+    return queryset
+
+
 def list_assigned_hostels(user):
     """
     Returns a QuerySet of all Hostels the user is authorized to manage.
@@ -257,10 +283,10 @@ def get_student_current_leave(student_id, start_date, end_date):
     ).first()
 
 
-def list_student_leaves(student_id):
+def list_student_leaves(student):
     """Get all leaves for a student."""
     return LeaveRequest.objects.filter(
-        student_id=student_id
+        student=student
     ).order_by('-created_at')
 
 
@@ -317,10 +343,10 @@ def get_complaint(complaint_id):
     return HostelComplaint.objects.filter(id=complaint_id).first()
 
 
-def list_student_complaints(student_id):
+def list_student_complaints(student):
     """Get all complaints from a student."""
     return HostelComplaint.objects.filter(
-        student_id=student_id
+        student=student
     ).order_by('-created_at')
 
 
@@ -352,17 +378,17 @@ def list_complaints_by_hall(hall_id):
     ).order_by('-created_at')
 
 
-def list_complaints_assigned_to_staff(staff_id):
-    """Get complaints assigned to a staff member."""
+def list_complaints_assigned_to_user(user_id):
+    """Get complaints assigned to a specific user (staff/warden)."""
     return HostelComplaint.objects.filter(
-        assigned_to_id=staff_id
+        assigned_to_user_id=user_id
     ).exclude(status=ComplaintStatusChoices.CLOSED).order_by('-created_at')
 
 
 def list_escalated_complaints():
     """Get complaints escalated to warden."""
     return HostelComplaint.objects.filter(
-        escalated_to_warden=True
+        status=ComplaintStatusChoices.ESCALATED
     ).order_by('-created_at')
 
 
@@ -510,6 +536,13 @@ def get_active_allotment_by_student(student):
     return None
 
 
+def get_active_allotment_by_student(student):
+    """Get the current active allotment for a student."""
+    return RoomAllotment.objects.filter(
+        student=student,
+        is_active=True
+    ).select_related('hostel', 'room').first()
+
 def list_allotments_by_hostel(hostel_id):
     """List active allotments for a hostel."""
     return RoomAllotment.objects.filter(
@@ -549,10 +582,10 @@ def get_hostel_capacity_dashboard():
 # HM-WF-104: ROOM CHANGE QUERIES
 # ══════════════════════════════════════════════════════════════
 
-def list_room_changes_by_student(student_id):
+def list_room_changes_by_student(student):
     """Get all room change requests for a student."""
     return RoomAllocationChange.objects.filter(
-        student_id=student_id
+        student=student
     ).order_by('-requested_date')
 
 
@@ -599,10 +632,10 @@ def get_all_room_changes():
 
 def get_student_room_changes(user):
     """Get all room changes for a student user."""
-    student = get_student(user.id)
+    student = get_student(user)
     if not student:
         return RoomAllocationChange.objects.none()
-    return list_room_changes_by_student(student.pk)
+    return list_room_changes_by_student(student)
 
 
 # ══════════════════════════════════════════════════════════════
@@ -614,18 +647,18 @@ def get_fine(fine_id):
     return HostelFine.objects.filter(id=fine_id).first()
 
 
-def list_student_fines(student_id):
+def list_student_fines(student):
     """Get all fines for a student."""
     return HostelFine.objects.filter(
-        student_id=student_id
+        student=student
     ).order_by('-issued_date')
 
 
-def list_student_pending_fines(student_id):
+def list_student_pending_fines(student):
     """Get unpaid fines for a student."""
     from .models import FineStatusChoices
     return HostelFine.objects.filter(
-        student_id=student_id,
+        student=student,
         status=FineStatusChoices.PENDING
     ).order_by('-due_date')
 
@@ -1010,11 +1043,11 @@ def get_all_leaves():
 
 def get_student_leaves(user):
     """Get all leaves for a student user."""
-    student = get_student(user.id)
+    student = get_student(user)
     if not student:
         return LeaveRequest.objects.none()
     return LeaveRequest.objects.filter(
-        student_id=student.pk
+        student=student
     ).select_related(
         'student__id__user',
         'decided_by'
@@ -1024,9 +1057,9 @@ def get_student_leaves(user):
 def get_all_complaints():
     """Get all complaints with optimized queries (for staff views)."""
     return HostelComplaint.objects.select_related(
-        'student__id__user',
-        'assigned_to__id__user',
-        'escalated_to__id__user'
+        'student',
+        'hostel',
+        'assigned_to_user'
     ).all().order_by('-created_at')
 
 

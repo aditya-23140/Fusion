@@ -18,9 +18,8 @@ from .models import (
     GuestRoomBooking, GuestRoom, Hostel, Room, RoomAllotment,
     HostelStaffAssignment,
     AccommodationApplicationWindow, AccommodationRequest,
-    LeaveStatusChoices, ComplaintStatusChoices,
-    AllocationChangeStatusChoices, FineStatusChoices, BookingStatusChoices,
-    StaffRoleChoices, RoomSetupStatusChoices
+    StaffRoleChoices, RoomSetupStatusChoices,
+    ComplaintHistory, ComplaintCategoryChoices, ComplaintStatusChoices
 )
 from notifications.signals import notify
 from django.db import transaction
@@ -308,105 +307,172 @@ def mark_attendance_bulk(date, attendance_data):
 # HM-WF-102: COMPLAINT MANAGEMENT SERVICES
 # ══════════════════════════════════════════════════════════════
 
-def create_complaint(student, title, description, category, priority, location=None):
+def _generate_complaint_uid():
+    """Generates a human-readable unique complaint ID: COMP-YYYYMMDD-XXXX."""
+    date_str = timezone.now().strftime('%Y%m%d')
+    with transaction.atomic():
+        # Get count of complaints created today for sequence
+        today_count = HostelComplaint.objects.filter(created_at__date=timezone.now().date()).count() + 1
+        return f"COMP-{date_str}-{str(today_count).zfill(4)}"
+
+def _log_complaint_history(complaint, changed_by, old_status, new_status, remarks=""):
+    """Internal helper to log status changes."""
+    ComplaintHistory.objects.create(
+        complaint=complaint,
+        changed_by=changed_by,
+        old_status=old_status,
+        new_status=new_status,
+        remarks=remarks
+    )
+
+def create_complaint(student, category, description, attachments=None):
     """
-    Create a new complaint.
+    Submit a new complaint with auto-routing logic.
+    - BR-HM-106: Active Allotment Prerequisite
+    - BR-HM-107: Auto-routing by Category
+    """
+    # BR-HM-106: Block if student has no active room allotment
+    active_allotment = selectors.get_active_allotment_by_student(student)
+    if not active_allotment:
+        raise ComplaintEligibilityError("Active hostel allotment required to submit complaints.")
+
+    # BR-HM-107: Auto-routing
+    hostel = active_allotment.hostel
+    assigned_to_user = None
     
-    Enforces:
-    - BR-HM-106: Complaint Eligibility Rule
-    - BR-HM-107: Complaint Routing by Category
-    """
-    # BR-HM-106: Check if student is currently in hostel
-    current_allocation = selectors.get_active_allotment_by_student(student)
-    if not current_allocation:
-        raise ComplaintEligibilityError(
-            "Only students with active hostel allotment can file complaints."
+    if category == ComplaintCategoryChoices.SECURITY:
+        # Route to Warden
+        warden_asgn = selectors.get_hostel_warden(hostel.hall_id)
+        if warden_asgn:
+            assigned_to_user = warden_asgn.user
+    else:
+        # Route to Caretaker
+        caretaker_asgn = selectors.get_hostel_caretaker(hostel.hall_id)
+        if caretaker_asgn:
+            assigned_to_user = caretaker_asgn.user
+
+    with transaction.atomic():
+        complaint = HostelComplaint.objects.create(
+            student=student,
+            hostel=hostel,
+            category=category,
+            description=description,
+            attachments=attachments,
+            status=ComplaintStatusChoices.SUBMITTED,
+            assigned_to_user=assigned_to_user,
+            complaint_uid=_generate_complaint_uid()
         )
+        
+        _log_complaint_history(
+            complaint=complaint,
+            changed_by=student.id.user,
+            old_status=None,
+            new_status=ComplaintStatusChoices.SUBMITTED,
+            remarks="Complaint created and auto-routed."
+        )
+
+    # Notify assignee
+    if assigned_to_user:
+        notify.send(
+            sender=student.id.user,
+            recipient=assigned_to_user,
+            verb="new complaint assigned",
+            action_object=complaint,
+            description=f"New {category} complaint {complaint.complaint_uid} submitted by {student}."
+        )
+
+    return complaint
+
+def update_complaint_to_in_progress(complaint_id, staff_user, remarks=""):
+    """Mark complaint as InProgress when staff starts working on it."""
+    complaint = selectors.get_complaint(complaint_id)
+    if not complaint:
+        raise HostelManagementException("Complaint not found.")
     
-    # Validate complaint data
-    if not title or len(title.strip()) < 5:
-        raise ComplaintRoutingError("Complaint title must be at least 5 characters.")
+    old_status = complaint.status
+    if old_status != ComplaintStatusChoices.SUBMITTED:
+        raise HostelManagementException("Can only move 'Submitted' complaints to 'In Progress'.")
+
+    with transaction.atomic():
+        complaint.status = ComplaintStatusChoices.IN_PROGRESS
+        complaint.save()
+        _log_complaint_history(complaint, staff_user, old_status, ComplaintStatusChoices.IN_PROGRESS, remarks)
     
-    if not description or len(description.strip()) < 20:
-        raise ComplaintRoutingError("Complaint description must be at least 20 characters.")
+    return complaint
+
+def escalate_complaint(complaint_id, staff_user, reason):
+    """
+    Escalate complaint to Warden.
+    - BR-HM-109: Only InProgress complaints can be escalated
+    """
+    complaint = selectors.get_complaint(complaint_id)
+    if not complaint:
+        raise HostelManagementException("Complaint not found.")
     
-    # Get hostel from student's allocation
-    hostel = current_allocation.hostel
-    
-    # BR-HM-107: Route complaint to appropriate staff by hostel
-    staff_assignment = selectors.get_hostel_staff(hostel.hall_id).first()
-    
-    complaint = HostelComplaint.objects.create(
-        student=student,
-        hostel=hostel,
-        title=title,
-        description=description,
-        category=category,
-        priority=priority,
-        location=location,
-        status=ComplaintStatusChoices.SUBMITTED,
-        assigned_to=staff_assignment.user if staff_assignment else None
+    # BR-HM-109: Block if status is not InProgress
+    if complaint.status != ComplaintStatusChoices.IN_PROGRESS:
+        raise EscalationAuthorizationError("Only complaints 'In Progress' can be escalated.")
+
+    # Find Warden
+    warden_asgn = selectors.get_hostel_warden(complaint.hostel.hall_id)
+    if not warden_asgn:
+        raise WardenAuthorityError("No active Warden found for this hostel.")
+
+    old_status = complaint.status
+    with transaction.atomic():
+        complaint.status = ComplaintStatusChoices.ESCALATED
+        complaint.assigned_to_user = warden_asgn.user
+        complaint.save()
+        _log_complaint_history(complaint, staff_user, old_status, ComplaintStatusChoices.ESCALATED, reason)
+
+    notify.send(
+        sender=staff_user,
+        recipient=warden_asgn.user,
+        verb="complaint escalated",
+        action_object=complaint,
+        description=f"Complaint {complaint.complaint_uid} escalated by {staff_user.get_full_name()}."
     )
     
     return complaint
 
-
-def update_complaint_status(complaint_id, new_status, resolution_notes=None):
+def resolve_complaint(complaint_id, resolver_user, resolution_remarks):
     """
-    Update complaint status.
-    
-    Enforces:
-    - BR-HM-108: Mandatory Resolution Remarks
+    Resolve a complaint.
+    - BR-HM-108: Remarks mandatory
+    - BR-HM-110: Only Warden resolve if Escalated
     """
     complaint = selectors.get_complaint(complaint_id)
     if not complaint:
-        raise HostelManagementException(f"Complaint {complaint_id} not found.")
-    
-    # BR-HM-108: Require resolution remarks when resolving
-    if new_status in [ComplaintStatusChoices.RESOLVED, ComplaintStatusChoices.CLOSED]:
-        if not resolution_notes or len(resolution_notes.strip()) < 10:
-            raise ResolutionRemarksError(
-                "Resolution remarks are mandatory and must be at least 10 characters."
-            )
-    
-    complaint.status = new_status
-    complaint.resolution_notes = resolution_notes
-    complaint.updated_at = timezone.now()
-    
-    if new_status == ComplaintStatusChoices.RESOLVED:
+        raise HostelManagementException("Complaint not found.")
+
+    if complaint.status in [ComplaintStatusChoices.RESOLVED, ComplaintStatusChoices.CLOSED]:
+        raise HostelManagementException(f"Cannot resolve a complaint that is already {complaint.status.lower()}.")
+
+    # BR-HM-108: Resolve remarks mandatory
+    if not resolution_remarks or len(resolution_remarks.strip()) < 10:
+        raise ResolutionRemarksError("Resolution remarks are mandatory (min 10 chars).")
+
+    # BR-HM-110: Warden authority check
+    if complaint.status == ComplaintStatusChoices.ESCALATED:
+        if not selectors.is_user_warden(resolver_user):
+            raise WardenAuthorityError("Only a Warden can resolve escalated complaints.")
+
+    old_status = complaint.status
+    with transaction.atomic():
+        complaint.status = ComplaintStatusChoices.RESOLVED
+        complaint.resolution_remarks = resolution_remarks
         complaint.resolved_at = timezone.now()
-    
-    complaint.save()
-    return complaint
+        complaint.save()
+        _log_complaint_history(complaint, resolver_user, old_status, ComplaintStatusChoices.RESOLVED, resolution_remarks)
 
-
-def escalate_complaint(complaint_id, warden):
-    """
-    Escalate complaint to warden.
-    
-    Enforces:
-    - BR-HM-109: Escalation Authorization Rule
-    - BR-HM-110: Warden Authority on Escalated Complaints
-    """
-    complaint = selectors.get_complaint(complaint_id)
-    if not complaint:
-        raise HostelManagementException(f"Complaint {complaint_id} not found.")
-    
-    # BR-HM-109: Only open/in-progress complaints can be escalated
-    if complaint.status not in [ComplaintStatusChoices.OPEN, ComplaintStatusChoices.IN_PROGRESS]:
-        raise EscalationAuthorizationError(
-            "Only open or in-progress complaints can be escalated."
-        )
-    
-    # BR-HM-110: Assign to appropriate warden
-    if not warden:
-        raise WardenAuthorityError("Escalation requires a valid warden assignment.")
-    
-    complaint.escalated_to_warden = True
-    complaint.warden_assigned = warden
-    complaint.status = ComplaintStatusChoices.IN_PROGRESS
-    complaint.updated_at = timezone.now()
-    complaint.save()
+    # Notify student
+    notify.send(
+        sender=resolver_user,
+        recipient=complaint.student.id.user,
+        verb="complaint resolved",
+        action_object=complaint,
+        description=f"Your complaint {complaint.complaint_uid} has been resolved."
+    )
     
     return complaint
 
@@ -1149,16 +1215,6 @@ def submit_leave_request(student, start_date, end_date, reason, destination=None
     return create_leave_request(student, start_date, end_date, reason, destination, contact_phone)
 
 
-def submit_complaint(student, category, title, description, priority=None, location=None):
-    """Wrapper for create_complaint — called by ComplaintListCreateView."""
-    return create_complaint(
-        student=student,
-        title=title,
-        description=description,
-        category=category,
-        priority=priority or 'medium',
-        location=location
-    )
 
 
 def update_complaint(complaint_id, status=None, resolution_notes=None):
@@ -1168,10 +1224,6 @@ def update_complaint(complaint_id, status=None, resolution_notes=None):
     return selectors.get_complaint(complaint_id)
 
 
-def resolve_complaint(complaint_id, resolution_notes=''):
-    """Resolve a complaint — called by ComplaintResolveView."""
-    from .models import ComplaintStatusChoices
-    return update_complaint_status(complaint_id, ComplaintStatusChoices.RESOLVED, resolution_notes)
 
 
 def approve_room_change(change_id, approved_by, remarks=None):

@@ -38,12 +38,14 @@ from applications.hostel_management.models import (
     HostelComplaint, RoomAllocationChange,
     HostelFine, StaffSchedule, HostelInventory, GuestRoomBooking,
     HostelNoticeBoard,
-    Hostel, Room, RoomAllotment, HostelStaffAssignment
+    Hostel, Room, RoomAllotment, HostelStaffAssignment,
+    ComplaintStatusChoices, ComplaintCategoryChoices, StaffRoleChoices
 )
 from . import serializers
 from .serializers import (
     LeaveRequestSerializer, LeaveRequestCreateSerializer, LeaveRequestDecisionSerializer,
-    HostelComplaintSerializer, HostelComplaintUpdateSerializer,
+    HostelComplaintSerializer, HostelComplaintCreateSerializer,
+    HostelComplaintResolveSerializer, HostelComplaintEscalateSerializer,
     RoomAllocationChangeSerializer,
     RoomAllocationChangeApprovalSerializer,
     HostelFineSerializer, HostelFinePaymentSerializer, HostelFineWaiverSerializer,
@@ -333,28 +335,20 @@ class LeaveRejectView(generics.UpdateAPIView):
     serializer_class = LeaveRequestDecisionSerializer
 
     def post(self, request, *args, **kwargs):
-        """Debug post for rejection."""
-        print(f"DEBUG: LeaveReject Attempt by {request.user} for ID {self.kwargs.get('pk')}")
         return self.patch(request, *args, **kwargs)
-        
+
     def patch(self, request, *args, **kwargs):
-        """Debug patch for rejection."""
-        serializer = self.get_serializer(data=request.data)
-        if not serializer.is_valid():
-            print(f"DEBUG: LeaveReject Serializer Errors: {serializer.errors}")
         return super().patch(request, *args, **kwargs)
 
     def get_object(self):
-        """Get leave request by ID."""
         return get_object_or_404(LeaveRequest, pk=self.kwargs['pk'])
 
     def perform_update(self, serializer):
-        """Reject leave via service."""
         leave = self.get_object()
         services.reject_leave(
             leave_id=leave.id,
             decided_by=self.request.user,
-            rejection_reason=serializer.validated_data.get('decision_remarks', '')
+            remarks=serializer.validated_data.get('decision_remarks')
         )
 
 
@@ -363,107 +357,110 @@ class LeaveRejectView(generics.UpdateAPIView):
 # ══════════════════════════════════════════════════════════════
 
 class ComplaintListCreateView(generics.ListCreateAPIView):
-    """List complaints or submit a new complaint."""
+    """List complaints (scoped) or submit new."""
     permission_classes = [IsAuthenticated]
-    serializer_class = HostelComplaintSerializer
+    parser_classes = [parsers.MultiPartParser, parsers.FormParser, parsers.JSONParser]
+
+    def get_serializer_class(self):
+        if self.request.method == 'POST':
+            return HostelComplaintCreateSerializer
+        return HostelComplaintSerializer
 
     def get_queryset(self):
-        """Get complaints for authenticated user or all if staff."""
         user = self.request.user
-        if user.is_staff:
-            return selectors.get_all_complaints()
-        return selectors.get_student_complaints(user)
+        if user.is_superuser:
+            return HostelComplaint.objects.all()
+        
+        student = selectors.get_student(user)
+        if student:
+            return selectors.list_student_complaints(student)
+
+        if selectors.is_user_warden(user):
+            assignments = selectors.list_user_staff_assignments(user, role=StaffRoleChoices.WARDEN)
+            hostel_ids = [a.hostel.hall_id for a in assignments]
+            return HostelComplaint.objects.filter(hostel__hall_id__in=hostel_ids)
+        
+        if selectors.is_user_caretaker(user):
+            assignments = selectors.list_user_staff_assignments(user, role=StaffRoleChoices.CARETAKER)
+            hostel_ids = [a.hostel.hall_id for a in assignments]
+            return HostelComplaint.objects.filter(hostel__hall_id__in=hostel_ids).exclude(category=ComplaintCategoryChoices.SECURITY)
+
+        return HostelComplaint.objects.none()
 
     def perform_create(self, serializer):
-        """Submit complaint via service."""
+        student = selectors.get_student(self.request.user)
+        if not student:
+            from rest_framework.exceptions import PermissionDenied
+            raise PermissionDenied("Only students can submit.")
         try:
-            student = selectors.get_student(self.request.user.id)
-            if not student:
-                 raise HostelManagementException("Only students can submit complaints.")
-
             services.create_complaint(
                 student=student,
                 category=serializer.validated_data['category'],
-                title=serializer.validated_data['title'],
                 description=serializer.validated_data['description'],
-                priority=serializer.validated_data.get('priority'),
-                location=serializer.validated_data.get('location')
+                attachments=self.request.FILES.get('attachments')
             )
-        except (ComplaintEligibilityError, ComplaintRoutingError, HostelManagementException) as e:
+        except Exception as e:
             from rest_framework.exceptions import ValidationError
             raise ValidationError({'detail': str(e)})
 
 
-class ComplaintMyListView(generics.ListAPIView):
-    """List only the authenticated user's complaints."""
+class ComplaintDetailView(generics.RetrieveAPIView):
     permission_classes = [IsAuthenticated]
     serializer_class = HostelComplaintSerializer
-
-    def get_queryset(self):
-        return selectors.get_student_complaints(self.request.user)
+    queryset = HostelComplaint.objects.all()
 
 
-class ComplaintRetrieveUpdateView(generics.RetrieveUpdateAPIView):
-    """Retrieve or update complaint details."""
+class StartComplaintView(generics.GenericAPIView):
     permission_classes = [IsAuthenticated]
-    serializer_class = HostelComplaintSerializer
-
-    def get_object(self):
-        """Get complaint by ID."""
-        return get_object_or_404(HostelComplaint, pk=self.kwargs['pk'])
-
-    def perform_update(self, serializer):
-        """Update complaint via service."""
-        complaint = self.get_object()
-        services.update_complaint(
-            complaint_id=complaint.id,
-            status=serializer.validated_data.get('status'),
-            resolution_notes=serializer.validated_data.get('resolution_remarks')
-        )
-
-
-class ComplaintEscalateView(generics.UpdateAPIView):
-    """Escalate complaint to warden."""
-    permission_classes = [IsAuthenticated]
-    serializer_class = HostelComplaintUpdateSerializer
-
-    def get_object(self):
-        """Get complaint by ID."""
-        return get_object_or_404(HostelComplaint, pk=self.kwargs['pk'])
-
-    def perform_update(self, serializer):
-        """Escalate complaint via service."""
-        complaint = self.get_object()
-        faculty = selectors.get_faculty(self.request.user.id)
-        if not faculty:
-             from rest_framework.exceptions import PermissionDenied
-             raise PermissionDenied("Only faculty (Wardens) can handle escalation.")
-
+    def post(self, request, pk):
         try:
-            services.escalate_complaint(
-                complaint_id=complaint.id,
-                warden=faculty
-            )
-        except (EscalationAuthorizationError, WardenAuthorityError, HostelManagementException) as e:
-            return Response({'detail': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+            complaint = services.update_complaint_to_in_progress(pk, request.user)
+            return Response(HostelComplaintSerializer(complaint).data)
+        except Exception as e:
+            return Response({'detail': str(e)}, status=400)
 
 
-class ComplaintResolveView(generics.UpdateAPIView):
-    """Mark complaint as resolved."""
+class EscalateComplaintView(generics.GenericAPIView):
     permission_classes = [IsAuthenticated]
-    serializer_class = HostelComplaintUpdateSerializer
+    serializer_class = HostelComplaintEscalateSerializer
+    def post(self, request, pk):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        try:
+            complaint = services.escalate_complaint(pk, request.user, serializer.validated_data['reason'])
+            return Response(HostelComplaintSerializer(complaint).data)
+        except Exception as e:
+            return Response({'detail': str(e)}, status=400)
 
-    def get_object(self):
-        """Get complaint by ID."""
-        return get_object_or_404(HostelComplaint, pk=self.kwargs['pk'])
 
-    def perform_update(self, serializer):
-        """Resolve complaint via service."""
-        complaint = self.get_object()
-        services.resolve_complaint(
-            complaint_id=complaint.id,
-            resolution_notes=serializer.validated_data.get('resolution_notes', '')
-        )
+class ResolveComplaintView(generics.GenericAPIView):
+    permission_classes = [IsAuthenticated]
+    serializer_class = HostelComplaintResolveSerializer
+    def post(self, request, pk):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        try:
+            complaint = services.resolve_complaint(pk, request.user, serializer.validated_data['resolution_remarks'])
+            return Response(HostelComplaintSerializer(complaint).data)
+        except Exception as e:
+            return Response({'detail': str(e)}, status=400)
+
+
+class ComplaintReportView(generics.GenericAPIView):
+    permission_classes = [IsAuthenticated]
+    def get(self, request):
+        if not selectors.is_user_warden(request.user):
+            from rest_framework.exceptions import PermissionDenied
+            raise PermissionDenied("Only Wardens can view reports.")
+        from django.db.models import Count
+        metrics = HostelComplaint.objects.values('category', 'status').annotate(total=Count('id'))
+        return Response({
+            'metrics': metrics,
+            'summary': {
+                'total_complaints': HostelComplaint.objects.count(),
+                'resolved_today': HostelComplaint.objects.filter(status=ComplaintStatusChoices.RESOLVED, resolved_at__date=timezone.now().date()).count()
+            }
+        })
 
 
 # ══════════════════════════════════════════════════════════════
