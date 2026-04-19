@@ -1,5 +1,6 @@
 import datetime
 from django.db import models
+from django.db.models import Q, UniqueConstraint
 from django.contrib.auth.models import User
 from applications.globals.models import ExtraInfo, Staff, Faculty
 from applications.academic_information.models import Student
@@ -1041,9 +1042,14 @@ class RoomAllotment(models.Model):
     class Meta:
         db_table = 'hostel_management_roomallotment'
         # Canonical check for 'student has active hostel allocation'
-        # One active allotment per student at a time
-        unique_together = ['student', 'is_active'] 
-
+        # Only one active allotment per student at a time
+        constraints = [
+            models.UniqueConstraint(
+                fields=['student', 'is_active'],
+                name='unique_active_allotment',
+                condition=models.Q(is_active=True)
+            )
+        ]
     def __str__(self):
         return f"{self.student.id.user.username} @ {self.hostel.name} - {self.room.room_number}"
 
