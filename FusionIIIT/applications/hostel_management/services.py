@@ -19,7 +19,9 @@ from .models import (
     HostelStaffAssignment,
     AccommodationApplicationWindow, AccommodationRequest,
     StaffRoleChoices, RoomSetupStatusChoices,
-    ComplaintHistory, ComplaintCategoryChoices, ComplaintStatusChoices
+    ComplaintHistory, ComplaintCategoryChoices, ComplaintStatusChoices,
+    LeaveStatusChoices, FineStatusChoices, BookingStatusChoices,
+    AllocationChangeStatusChoices
 )
 from notifications.signals import notify
 from django.db import transaction
