@@ -43,12 +43,12 @@ from ..models import (
     RoomAllotment,
     Hostel,
     Room,
-    HostelTypeChoices as HostelOpStatusChoices,
+    HostelTypeChoices,
     RoomTypeChoices,
     StaffRoleChoices,
+    HostelStatusChoices,
     HostelStaffAssignment,
     HostelAuditLog
-
 )
 
 
@@ -204,7 +204,7 @@ class HostelStatusSerializer(serializers.Serializer):
     - BR-HM-008.b: Block activation if no active Warden OR no active Caretaker
     - BR-HM-019.a: Same as BR-HM-008.b
     """
-    status = serializers.ChoiceField(choices=HostelOpStatusChoices.choices)
+    status = serializers.ChoiceField(choices=HostelStatusChoices.choices)
 
     def validate_status(self, value):
         hostel = self.context.get('hostel')
@@ -218,7 +218,7 @@ class HostelStatusSerializer(serializers.Serializer):
             raise serializers.ValidationError(f"Hostel is already in '{value}' status.")
 
         # BR-HM-008.a: Block deactivation if occupied rooms exist
-        if value == HostelOpStatusChoices.INACTIVE:
+        if value == HostelStatusChoices.INACTIVE:
             occupied_rooms = hostel.rooms_setup.filter(current_occupancy__gt=0).exists()
             if occupied_rooms:
                 raise serializers.ValidationError(
@@ -227,7 +227,7 @@ class HostelStatusSerializer(serializers.Serializer):
                 )
 
         # BR-HM-008.b / BR-HM-019.a: Block activation without staff
-        if value == HostelOpStatusChoices.ACTIVE:
+        if value == HostelStatusChoices.ACTIVE:
             has_warden = hostel.staff_assignments.filter(
                 role=StaffRoleChoices.WARDEN, is_active=True
             ).exists()

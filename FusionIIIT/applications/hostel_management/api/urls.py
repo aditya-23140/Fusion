@@ -29,6 +29,11 @@ hostel_setup_patterns = [
     path('<str:pk>/bulk-batch-allot/', views.BulkBatchAllocationView.as_view(), name='hostel-bulk-batch-allot'),
 ]
 
+admin_patterns = [
+    path('faculty/', views.FacultyListView.as_view(), name='faculty-list'),
+    path('staff/', views.StaffListView.as_view(), name='staff-list'),
+]
+
 # ══════════════════════════════════════════════════════════════
 # ACCOMMODATION REQUEST & ALLOTMENT ROUTES (HM-WF-103)
 # ══════════════════════════════════════════════════════════════
@@ -40,6 +45,7 @@ accommodation_patterns = [
     path('bulk-allot/', views.BulkAllotmentView.as_view(), name='bulk-allot'),
     path('my-allotment/', views.MyAllotmentView.as_view(), name='my-allotment'),
     path('allotments/', views.RoomAllotmentListView.as_view(), name='allotment-list'),
+    path('allotments/<int:pk>/delete/', views.RoomAllotmentDestroyView.as_view(), name='allotment-delete'),
 ]
 
 # ══════════════════════════════════════════════════════════════
@@ -150,6 +156,7 @@ extended_stay_patterns = [
 # ══════════════════════════════════════════════════════════════
 urlpatterns = [
     path('hostels/', include((hostel_setup_patterns, 'hostels-setup'))),
+    path('admin/', include((admin_patterns, 'admin'))),
     path('leaves/', include((leave_patterns, 'leaves'))),
     path('complaints/', include((complaint_patterns, 'complaints'))),
     path('accommodation/', include((accommodation_patterns, 'accommodation'))),

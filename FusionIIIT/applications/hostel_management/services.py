@@ -19,7 +19,7 @@ from .models import (
     AccommodationApplicationWindow, AccommodationRequest,
     LeaveStatusChoices, ComplaintStatusChoices,
     AllocationChangeStatusChoices, FineStatusChoices, BookingStatusChoices,
-    StaffRoleChoices
+    StaffRoleChoices, RoomSetupStatusChoices
 )
 from django.db import transaction
 from . import selectors
@@ -1545,3 +1545,41 @@ def perform_bulk_batch_allocation(hall_id, programme_category, admission_year, g
             'total_found': total_students,
             'message': f"Successfully allotted {allotted_count} of {total_students} students."
         }
+
+
+@transaction.atomic
+def delete_room_allotment(allotment_id):
+    """
+    Permanently delete a room allotment and reconcile occupancy.
+    - Used by Super Admins to manually clear allocations.
+    """
+    # Use global RoomSetupStatusChoices, fallback to string if necessary
+    try:
+        AVAILABLE = RoomSetupStatusChoices.AVAILABLE
+    except (AttributeError, NameError):
+        AVAILABLE = "Available"
+
+    # Fetch allotment without select_for_update to avoid transaction isolation issues in some environments
+    allotment = RoomAllotment.objects.filter(id=allotment_id).first()
+    if not allotment:
+        raise HostelManagementException(f"Allocation record {allotment_id} not found.")
+
+    room = allotment.room
+    if not room:
+        # If room is missing, we still delete the allotment but log a warning
+        allotment.delete()
+        return True
+
+    # Update room occupancy safely
+    room.current_occupancy = max(0, (room.current_occupancy or 1) - 1)
+    
+    # If room is now below capacity, mark as available
+    if room.current_occupancy < room.capacity:
+        room.status = AVAILABLE
+        
+    room.save()
+
+    # Delete the allotment record
+    allotment.delete()
+    
+    return True

@@ -51,6 +51,7 @@ from .serializers import (
     HostelNoticeBoardSerializer, HostelAttendanceSerializer
 )
 from .. import selectors, services
+from ..permissions import IsHostelSuperAdmin, IsAssignedToHostel
 from ..services import (
     HostelManagementException, LeaveEligibilityError, LeaveDateError,
     ComplaintEligibilityError, ComplaintRoutingError, ResolutionRemarksError,
@@ -67,29 +68,15 @@ from ..services import (
 class StandardPagination(PageNumberPagination):
     """Standard pagination: 50 items per page for optimized payload."""
     page_size = 50
+    page_size_query_param = 'page_size'
+    max_page_size = 500
+    page_query_param = 'page'
 
 
 class IsStudent(BasePermission):
     """Permission check: student role."""
     def has_permission(self, request, view):
         return bool(request.user and request.user.is_authenticated and hasattr(request.user, 'student'))
-
-
-class IsSuperAdmin(BasePermission):
-    """Permission check: super administrator role."""
-    def has_permission(self, request, view):
-        # Super admin logic: can be customized based on project's user tagging
-        return bool(request.user and request.user.is_authenticated and (request.user.is_superuser or request.user.groups.filter(name='Super Admin').exists()))
-    page_size = 50
-    page_size_query_param = 'page_size'
-    max_page_size = 500
-    page_query_param = 'page'
-
-
-class IsSuperAdmin(BasePermission):
-    """Permission for Super Admin role: hostel creation, warden/caretaker assignment, batch allocation."""
-    def has_permission(self, request, view):
-        return request.user and request.user.is_authenticated and request.user.is_superuser
 
 
 class IsWardenOrCaretaker(BasePermission):
@@ -130,7 +117,7 @@ class IsStudent(BasePermission):
 
 class FacultyListView(generics.ListAPIView):
     """List all faculty members available for warden assignment."""
-    permission_classes = [IsSuperAdmin]
+    permission_classes = [IsHostelSuperAdmin]
     
     def get(self, request, *args, **kwargs):
         """Get all faculty members."""
@@ -159,7 +146,7 @@ class FacultyListView(generics.ListAPIView):
 
 class StaffListView(generics.ListAPIView):
     """List all staff members available for caretaker assignment."""
-    permission_classes = [IsSuperAdmin]
+    permission_classes = [IsHostelSuperAdmin]
     
     def get(self, request, *args, **kwargs):
         """Get all staff members."""
@@ -487,7 +474,7 @@ class SubmitAccommodationRequestView(generics.CreateAPIView):
 
 class ListRequestsView(generics.ListAPIView):
     """List all pending accommodation requests."""
-    permission_classes = [IsSuperAdmin | IsWardenOrCaretaker]
+    permission_classes = [IsHostelSuperAdmin | IsWardenOrCaretaker]
     serializer_class = serializers.AccommodationRequestSerializer
     pagination_class = StandardPagination
 
@@ -498,7 +485,7 @@ class ListRequestsView(generics.ListAPIView):
 
 class RoomCapacityDashboardView(generics.ListAPIView):
     """View hostel capacity and occupancy dashboard."""
-    permission_classes = [IsSuperAdmin | IsWardenOrCaretaker]
+    permission_classes = [IsHostelSuperAdmin | IsWardenOrCaretaker]
     serializer_class = serializers.RoomCapacityDashboardSerializer
 
     def get_queryset(self):
@@ -535,7 +522,7 @@ class MyAllotmentView(generics.RetrieveAPIView):
 
 class BulkAllotmentView(generics.GenericAPIView):
     """Perform bulk allotment for selected requests."""
-    permission_classes = [IsSuperAdmin | IsWardenOrCaretaker]
+    permission_classes = [IsHostelSuperAdmin | IsWardenOrCaretaker]
     serializer_class = serializers.BulkAllotmentSerializer
 
     def post(self, request, *args, **kwargs):
@@ -556,7 +543,7 @@ class BulkBatchAllocationView(generics.GenericAPIView):
     Perform bulk batch allocation for a hostel.
     Allocates students sequentially by floor and room number.
     """
-    permission_classes = [IsSuperAdmin | IsWardenOrCaretaker]
+    permission_classes = [IsHostelSuperAdmin | IsWardenOrCaretaker]
     serializer_class = serializers.BatchAllocationSerializer
 
     def post(self, request, pk, *args, **kwargs):
@@ -592,7 +579,7 @@ class RoomAllotmentListView(generics.ListAPIView):
     
     def get_permissions(self):
         # Accessible by SuperAdmin, Warden, or Caretaker
-        return [IsAuthenticated(), (IsSuperAdmin | IsWardenOrCaretaker)()]
+        return [IsAuthenticated(), (IsHostelSuperAdmin | IsWardenOrCaretaker)()]
 
     def get_queryset(self):
         user = self.request.user
@@ -613,15 +600,37 @@ class RoomAllotmentListView(generics.ListAPIView):
         if hall_id and hall_id in assigned_hall_ids:
             return selectors.list_active_room_allotments(hall_id=hall_id)
         
-        # Return all allotments in assigned hostels, ordered by most recent
+        # Return all allotments in assigned hostels, ordered by room number
         return RoomAllotment.objects.filter(
             hostel_id__in=assigned_hall_ids,
             is_active=True
-        ).order_by('-allotted_at')
-        return RoomAllotment.objects.filter(
-            hostel__hall_id__in=assigned_hostels,
-            is_active=True
         ).select_related('student__id__user', 'room', 'hostel').order_by('room__room_number')
+
+
+class RoomAllotmentDestroyView(generics.DestroyAPIView):
+    """
+    Permanently delete a room allotment (SuperAdmin only).
+    - Reconciles room occupancy via service.
+    """
+    queryset = RoomAllotment.objects.all()
+    permission_classes = [IsHostelSuperAdmin]
+
+    def perform_destroy(self, instance):
+        """Call service to handle deletion with occupancy logic."""
+        try:
+            services.delete_room_allotment(instance.id)
+        except HostelManagementException as e:
+            from rest_framework.exceptions import ValidationError
+            raise ValidationError({"detail": str(e)})
+        except Exception as e:
+            from rest_framework.exceptions import APIException
+            import traceback
+            # Log the full traceback to the server console for the user to see
+            print(traceback.format_exc())
+            # Re-raise as APIException but with 400 to avoid generic 500 in Axios
+            exc = APIException(detail=f"Unexpected deletion error: {str(e)}")
+            exc.status_code = 400
+            raise exc
 
 
 # ══════════════════════════════════════════════════════════════

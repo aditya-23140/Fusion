@@ -20,13 +20,10 @@ class IsHostelSuperAdmin(BasePermission):
     message = "Only Super Admins can perform this action."
 
     def has_permission(self, request, view):
-        return (
-            request.user
-            and request.user.is_authenticated
-            and (
-                request.user.is_superuser
-                or request.user.groups.filter(name='Super Admin').exists()
-            )
+        return bool(
+            request.user and 
+            request.user.is_authenticated and 
+            request.user.is_superuser
         )
 
 
