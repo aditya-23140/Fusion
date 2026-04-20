@@ -363,7 +363,7 @@ class LeaveRejectView(generics.UpdateAPIView):
         services.reject_leave(
             leave_id=leave.id,
             decided_by=self.request.user,
-            remarks=serializer.validated_data.get('decision_remarks')
+            rejection_reason=serializer.validated_data.get('decision_remarks')
         )
 
 
