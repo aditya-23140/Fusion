@@ -131,14 +131,21 @@ class RoomTypeChoices(models.TextChoices):
 
 class BookingStatusChoices(models.TextChoices):
     """Guest room booking status."""
-    PENDING = "pending", "Pending"
-    APPROVED = "approved", "Approved"
-    CONFIRMED = "confirmed", "Confirmed"
-    REJECTED = "rejected", "Rejected"
-    CANCELED = "canceled", "Canceled"
-    CHECKED_IN = "checked_in", "Checked In"
-    CHECKED_OUT = "checked_out", "Checked Out"
-    COMPLETE = "complete", "Complete"
+    PENDING = "Pending", "Pending"
+    APPROVED = "Approved", "Approved"
+    REJECTED = "Rejected", "Rejected"
+    CHECKED_IN = "CheckedIn", "Checked In"
+    COMPLETED = "Completed", "Completed"
+    CANCELLED = "Cancelled", "Cancelled"
+
+
+class DamageSeverityChoices(models.TextChoices):
+    """Guest room damage severity levels."""
+    NONE = "None", "None"
+    MINOR = "Minor", "Minor"
+    MODERATE = "Moderate", "Moderate"
+    MAJOR = "Major", "Major"
+    SEVERE = "Severe", "Severe"
 
 
 class HostelManagementConstants:
@@ -485,51 +492,52 @@ class HallWarden(models.Model):
 
 class GuestRoomBooking(models.Model):
     """
-    Records information related to booking of guest rooms in various Hall of Residences.
-
-    'hall' refers to related Hall of Residence.
-    'student' refers to the related Student who has done the booking.
-    'guest_name','guest_phone','guest_email','guest_address' stores details of guests.
-    'rooms_required' stores the number of rooms booked.
-    'guest_room' refers to related guest room (ForeignKey).
-    'total_guests' stores the number of guests.
-    'purpose' stores the purpose of stay of guests.
-    'arrival_date','arrival_time' stores the arrival date and time of the guests.
-    'departure_date','departure_time' stores the departure date and time of the guests.
-    'status' stores the status of booking from the available options in 'BOOKING_STATUS'.
-    'booking_date' stores the date of booking.
-    'nationality' stores the nationality of the guests.
-    """    
-    ROOM_TYPES = [
-        ('single', 'Single'),
-        ('double', 'Double'),
-        ('triple', 'Triple'),
-    ]
-    
-    hostel = models.ForeignKey(Hostel, on_delete=models.CASCADE, related_name='guest_bookings')
-    student = models.ForeignKey(Student, on_delete=models.CASCADE, related_name='guest_room_bookings', null=True, blank=True)
-    guest_room = models.ForeignKey('GuestRoom', on_delete=models.SET_NULL, null=True, blank=True, related_name='bookings')
+    Refined GuestRoomBooking model (Chunk 12).
+    Tracks the entire lifecycle of a guest room booking.
+    """
+    student = models.ForeignKey(Student, on_delete=models.CASCADE, related_name='guest_room_bookings')
+    room = models.ForeignKey(Room, on_delete=models.CASCADE, related_name='guest_bookings')
+    hostel = models.ForeignKey(Hostel, on_delete=models.CASCADE, related_name='guest_room_bookings', to_field='hall_id')
     guest_name = models.CharField(max_length=255)
-    guest_phone = models.CharField(max_length=255)
-    guest_email = models.CharField(max_length=255, blank=True)
-    guest_address = models.TextField(blank=True)
-    rooms_required = models.IntegerField(default=1, null=True, blank=True)
-    total_guests = models.IntegerField(default=1)
-    purpose = models.TextField()
-    arrival_date = models.DateField(auto_now_add=False, auto_now=False)
-    departure_date = models.DateField(auto_now_add=False, auto_now=False)
-    status = models.CharField(max_length=255, choices=HostelManagementConstants.BOOKING_STATUS, default="Pending")
-    booking_date = models.DateField(auto_now_add=False, auto_now=False, default=timezone.now)
-    nationality = models.CharField(max_length=255, blank=True)
-    room_type = models.CharField(max_length=10, choices=ROOM_TYPES, default='single')
-    review_remarks = models.TextField(blank=True, null=True)
-    checked_in_at = models.DateTimeField(null=True, blank=True)
-    checked_out_at = models.DateTimeField(null=True, blank=True)
-    created_at = models.DateTimeField(auto_now_add=True, null=True, blank=True)
-    updated_at = models.DateTimeField(auto_now=True, null=True, blank=True)
+    guest_phone = models.CharField(max_length=20, null=True, blank=True)
+    guest_email = models.EmailField(null=True, blank=True)
+    guest_address = models.TextField(blank=True, default='')
+    nationality = models.CharField(max_length=100, blank=True, default='')
+    visit_purpose = models.TextField() # Min length enforced in serializer
+    check_in_date = models.DateField()
+    check_out_date = models.DateField()
+    status = models.CharField(
+        max_length=20,
+        choices=BookingStatusChoices.choices,
+        default=BookingStatusChoices.PENDING
+    )
+    per_night_rate = models.DecimalField(max_digits=10, decimal_places=2)
+    total_charges = models.DecimalField(max_digits=10, decimal_places=2)
+    advance_charge_breakdown_json = models.JSONField(default=dict, blank=True)
     
+    # ID Verification Fields (Fill on Check-In)
+    id_proof_type = models.CharField(max_length=50, null=True, blank=True)
+    id_proof_number = models.CharField(max_length=50, null=True, blank=True)
+    id_verified_at = models.DateTimeField(null=True, blank=True)
+    
+    caretaker_remarks = models.TextField(blank=True, null=True)
+    
+    booking_uid = models.CharField(max_length=50, unique=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'hostel_management_guestroombooking'
+        ordering = ['-created_at']
+
     def __str__(self):
-        return '%s ----> %s - %s' % (self.id, self.guest_name, self.status)
+        return f"Booking {self.booking_uid} - {self.guest_name} ({self.status})"
+
+    def save(self, *args, **kwargs):
+        if not self.booking_uid:
+            import uuid
+            self.booking_uid = f"GRB-{uuid.uuid4().hex[:8].upper()}"
+        super().save(*args, **kwargs)
 
 
 
@@ -1023,51 +1031,61 @@ class StudentDetails(models.Model):
 
 class GuestRoom(models.Model):
     """
-    Records information related to guest rooms in Hall of Residences.
-    
-    'hall' foreign key: the hostel to which the room belongs.
-    'room_number' guest room number.
-    'room_type' type of the room (single/double/triple).
-    'capacity' maximum occupancy of the room.
-    'status' current status of the room (available/occupied/maintenance).
-    'occupied_till' date field that tells the next time the room will be vacant.
-    'created_at' timestamp when room was created.
-    'updated_at' timestamp when room was last updated.
+    Registry for rooms designated as Guest Rooms.
+    Caretakers add rooms here to make them available for GuestRoomBooking.
     """
-    ROOM_TYPE_CHOICES = [
-        ('single', 'Single'),
-        ('double', 'Double'),
-        ('triple', 'Triple'),
-    ]
-    
-    ROOM_STATUS_CHOICES = [
-        ('available', 'Available'),
-        ('occupied', 'Occupied'),
-        ('maintenance', 'Under Maintenance'),
-    ]
-    
-    hostel = models.ForeignKey(Hostel, on_delete=models.CASCADE, related_name='guest_rooms')
-    room_number = models.CharField(max_length=50)
-    room_type = models.CharField(max_length=20, choices=ROOM_TYPE_CHOICES, default='single')
-    capacity = models.IntegerField(default=1)
-    status = models.CharField(max_length=20, choices=ROOM_STATUS_CHOICES, default='available')
-    occupied_till = models.DateField(null=True, blank=True)
+    hostel = models.ForeignKey(Hostel, on_delete=models.CASCADE, related_name='guest_rooms_registry', to_field='hall_id')
+    room = models.OneToOneField(Room, on_delete=models.CASCADE, related_name='guest_room_info')
+    is_active = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
-    
+
     class Meta:
-        ordering = ['hostel', 'room_number']
-        unique_together = ['hostel', 'room_number']
-    
-    @property
-    def is_vacant(self) -> bool:
-        """Check if room is currently vacant."""
-        if self.occupied_till and self.occupied_till >= timezone.now().date():
-            return False
-        return True
-    
+        db_table = 'hostel_management_guestroom'
+        ordering = ['hostel', 'room__room_number']
+
     def __str__(self):
-        return f"{self.hall.hall_name} - {self.room_number} ({self.room_type})"
+        return f"Guest Room: {self.hostel.name} - {self.room.room_number}"
+
+
+class GuestRoomInspection(models.Model):
+    """
+    Records room inspection results upon guest check-out.
+    Mandatory for transition to 'Completed' status.
+    """
+    booking = models.OneToOneField(GuestRoomBooking, on_delete=models.CASCADE, related_name='inspection')
+    conducted_by = models.ForeignKey(User, on_delete=models.CASCADE, related_name='inspections_conducted')
+    damage_found = models.BooleanField(default=False)
+    checklist_json = models.JSONField(default=dict) # e.g. {"walls": "ok", "furniture": "damaged"}
+    damage_description = models.TextField(null=True, blank=True)
+    damage_photos = models.FileField(upload_to='hostel/guest_rooms/damages/', null=True, blank=True)
+    severity = models.CharField(
+        max_length=20,
+        choices=DamageSeverityChoices.choices,
+        null=True, blank=True
+    )
+    estimated_repair_cost = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
+    inspection_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'hostel_management_guestroominspection'
+
+
+class GuestRoomPolicy(models.Model):
+    """
+    Hostel-specific settings for Guest Room bookings.
+    """
+    hostel = models.OneToOneField(Hostel, on_delete=models.CASCADE, related_name='guest_policy', to_field='hall_id')
+    per_night_rate = models.DecimalField(max_digits=10, decimal_places=2, default=500.00)
+    max_duration_nights = models.PositiveIntegerField(default=7)
+    min_advance_days = models.PositiveIntegerField(default=2)
+    max_advance_days = models.PositiveIntegerField(default=30)
+    max_concurrent_bookings_per_student = models.PositiveIntegerField(default=3)
+    fines_grace_threshold = models.DecimalField(max_digits=10, decimal_places=2, default=0.00) # BR-HM-051.b
+    updated_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'hostel_management_guestroompolicy'
 
     
 

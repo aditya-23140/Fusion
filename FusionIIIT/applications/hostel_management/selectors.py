@@ -872,85 +872,120 @@ def list_notices_by_poster(user_id):
 
 
 # ══════════════════════════════════════════════════════════════
-# HM-WF-112: GUEST ROOM QUERIES
+# HM-WF-112: GUEST ROOM SELECTORS (CHUNK 12)
 # ══════════════════════════════════════════════════════════════
 
-def get_guest_room(room_id):
-    """Get a specific guest room."""
-    return GuestRoom.objects.filter(id=room_id).first()
+def get_guest_room(guest_room_id):
+    """Fetch a guest room entry by ID."""
+    return GuestRoom.objects.filter(id=guest_room_id).select_related('room', 'hostel').first()
 
 
-def list_hall_guest_rooms(hall_id):
-    """Get all guest rooms in a hostel."""
-    return GuestRoom.objects.filter(
-        hostel__hall_id=hall_id
-    ).order_by('room_number')
+def list_guest_rooms_registry(hall_id=None):
+    """List all rooms in the guest registry."""
+    queryset = GuestRoom.objects.filter(is_active=True).select_related('room', 'hostel')
+    if hall_id:
+        queryset = queryset.filter(hostel__hall_id=hall_id)
+    return queryset
 
 
-def list_available_guest_rooms(hall_id):
-    """Get available guest rooms in a hall."""
-    return GuestRoom.objects.filter(
+def get_guest_room_availability(guest_room_id, start_date, end_date, exclude_booking_id=None):
+    """
+    Check if a specifically registered guest room is available for a date range.
+    Returns False if overlapping active/checked-in booking exists.
+    """
+    from .models import BookingStatusChoices
+    
+    overlaps = GuestRoomBooking.objects.filter(
+        room__guest_room_info__id=guest_room_id, # Link via Room -> GuestRoom
+        status__in=[BookingStatusChoices.APPROVED, BookingStatusChoices.CHECKED_IN],
+        check_in_date__lt=end_date,
+        check_out_date__gt=start_date
+    )
+    
+    if exclude_booking_id:
+        overlaps = overlaps.exclude(id=exclude_booking_id)
+        
+    return not overlaps.exists()
+
+
+def list_available_rooms_for_guest_designation(hall_id):
+    """List rooms in a hostel that are NOT currently in the GuestRoom registry."""
+    registered_room_ids = GuestRoom.objects.filter(
+        hostel__hall_id=hall_id, is_active=True
+    ).values_list('room_id', flat=True)
+    
+    return Room.objects.filter(
         hostel__hall_id=hall_id,
-        status='available'
-    ).order_by('room_number')
+        current_occupancy=0,
+        status='Available'
+    ).exclude(id__in=registered_room_ids).order_by('room_number')
 
 
 def get_guest_booking(booking_id):
-    """Get a specific guest room booking."""
-    return GuestRoomBooking.objects.filter(id=booking_id).first()
+    """Fetch guest booking with related data."""
+    return GuestRoomBooking.objects.filter(id=booking_id).select_related(
+        'student__id__user', 'room', 'hostel'
+    ).first()
 
 
-def list_student_guest_bookings(student_id):
-    """Get all guest room bookings for a student."""
-    return GuestRoomBooking.objects.filter(
-        student_id=student_id
-    ).order_by('-created_at')
+def get_guest_booking_by_uid(booking_uid):
+    """Fetch guest booking by public UID."""
+    return GuestRoomBooking.objects.filter(booking_uid=booking_uid).select_related(
+        'student__id__user', 'room', 'hostel'
+    ).first()
 
 
-def list_pending_guest_bookings():
-    """Get all pending guest room bookings."""
-    from .models import GuestRoomBookingStatusChoices
-    return GuestRoomBooking.objects.filter(
-        status=GuestRoomBookingStatusChoices.PENDING
-    ).order_by('-created_at')
+def list_student_guest_bookings(student):
+    """List guest bookings for a specific student."""
+    return GuestRoomBooking.objects.filter(student=student).order_by('-created_at')
 
 
-def list_guest_bookings_by_status(status):
-    """Get guest bookings by status."""
-    return GuestRoomBooking.objects.filter(
-        status=status
-    ).order_by('-created_at')
+def list_pending_guest_bookings(hall_ids=None):
+    """List pending bookings for Caretaker review."""
+    from .models import BookingStatusChoices
+    queryset = GuestRoomBooking.objects.filter(
+        status=BookingStatusChoices.PENDING
+    ).select_related('student__id__user', 'room', 'hostel')
+    
+    if hall_ids:
+        queryset = queryset.filter(hostel__hall_id__in=hall_ids)
+    return queryset.order_by('check_in_date')
 
 
-def list_checked_in_guest_bookings():
-    """Get all currently checked-in guest bookings."""
-    from .models import GuestRoomBookingStatusChoices
-    return GuestRoomBooking.objects.filter(
-        status=GuestRoomBookingStatusChoices.CHECKED_IN
-    ).order_by('-arrival_date')
+def list_guest_bookings_scoped(user, filters=None):
+    """
+    List bookings based on user role and filters.
+    """
+    from .models import BookingStatusChoices
+    
+    if user.is_superuser:
+        queryset = GuestRoomBooking.objects.all()
+    elif is_user_warden_or_caretaker(user):
+        assigned_hostels = list_assigned_hostels(user).values_list('hall_id', flat=True)
+        queryset = GuestRoomBooking.objects.filter(hostel__hall_id__in=assigned_hostels)
+    else:
+        student = get_student(user)
+        queryset = GuestRoomBooking.objects.filter(student=student)
+
+    if filters:
+        if 'status' in filters:
+            queryset = queryset.filter(status=filters['status'])
+        if 'hostel' in filters:
+            queryset = queryset.filter(hostel__hall_id=filters['hostel'])
+
+    return queryset.select_related('student__id__user', 'room', 'hostel').order_by('-created_at')
 
 
-def list_upcoming_guest_arrivals(days=7):
-    """Get guest bookings arriving within X days."""
-    from .models import GuestRoomBookingStatusChoices
-    today = timezone.now().date()
-    upcoming = today + timedelta(days=days)
-    return GuestRoomBooking.objects.filter(
-        status=GuestRoomBookingStatusChoices.CONFIRMED,
-        arrival_date__range=[today, upcoming]
-    ).order_by('arrival_date')
+def get_guest_policy(hall_id):
+    """Fetch the guest policy for a specific hostel."""
+    from .models import GuestRoomPolicy
+    return GuestRoomPolicy.objects.filter(hostel__hall_id=hall_id).first()
 
 
-def get_all_guest_bookings():
-    """Get all guest room bookings (for staff)."""
-    return GuestRoomBooking.objects.all().order_by('-created_at')
-
-
-def get_student_guest_bookings(user):
-    """Get all guest room bookings for a student user."""
-    return GuestRoomBooking.objects.filter(
-        student_id=user.id
-    ).order_by('-created_at')
+def get_guest_inspection(booking_id):
+    """Fetch inspection result for a booking."""
+    from .models import GuestRoomInspection
+    return GuestRoomInspection.objects.filter(booking_id=booking_id).first()
 
 
 # ══════════════════════════════════════════════════════════════

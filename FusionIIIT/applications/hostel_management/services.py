@@ -125,6 +125,27 @@ class FineValidationError(HostelManagementException):
 
 
 # ══════════════════════════════════════════════════════════════
+# HM-WF-112: GUEST ROOM EXCEPTIONS (CHUNK 12)
+# ══════════════════════════════════════════════════════════════
+
+class GuestRoomBookingError(HostelManagementException):
+    """Base exception for guest room booking errors."""
+    pass
+
+class GuestRoomAvailabilityError(GuestRoomBookingError):
+    """Raised when room is not available for requested dates."""
+    pass
+
+class GuestRoomPolicyError(GuestRoomBookingError):
+    """Raised when booking violates hostel policies."""
+    pass
+
+class GuestRoomInspectionError(GuestRoomBookingError):
+    """Raised during check-out if inspection fails."""
+    pass
+
+
+# ══════════════════════════════════════════════════════════════
 # HM-WF-101: LEAVE MANAGEMENT SERVICES
 # ══════════════════════════════════════════════════════════════
 
@@ -1026,9 +1047,12 @@ def check_out_guest(booking_id):
     booking.save()
     
     # Clear room occupancy
-    if booking.guest_room:
-        booking.guest_room.occupied_till = None
-        booking.guest_room.save()
+    room = booking.room
+    if room:
+        room.current_occupancy = max(0, room.current_occupancy - 1)
+        if room.current_occupancy < room.capacity:
+            room.status = 'Available'
+        room.save()
     
     return booking
 
@@ -2218,3 +2242,233 @@ def _trigger_urgent_notice_notification(notice):
     """
     # Logic to identify students in target hostel and send notification
     pass
+# ══════════════════════════════════════════════════════════════
+# HM-WF-112: GUEST ROOM SERVICES (CHUNK 12)
+# ══════════════════════════════════════════════════════════════
+
+@transaction.atomic
+def register_guest_room_service(hostel, room, caretaker_user):
+    if GuestRoom.objects.filter(room=room).exists():
+        raise GuestRoomBookingError(f"Room {room.room_number} is already in the guest registry.")
+    
+    # Ensure room is completely empty and available
+    if room.current_occupancy > 0 or room.status != 'Available':
+        raise GuestRoomBookingError(
+            f"Room {room.room_number} is not suitable for guest designation. "
+            "It must be completely empty and in 'Available' status."
+        )
+    
+    guest_room = GuestRoom.objects.create(
+        hostel=hostel,
+        room=room,
+        is_active=True
+    )
+    return guest_room
+
+
+@transaction.atomic
+def update_guest_policy_service(hostel, caretaker_user, **policy_data):
+    """Configure or update guest booking policies for a hostel."""
+    from .models import GuestRoomPolicy
+    
+    policy, created = GuestRoomPolicy.objects.get_or_create(
+        hostel=hostel,
+        defaults={'updated_by': caretaker_user}
+    )
+    
+    for key, value in policy_data.items():
+        if hasattr(policy, key):
+            setattr(policy, key, value)
+    
+    policy.updated_by = caretaker_user
+    policy.save()
+    return policy
+
+
+@transaction.atomic
+def create_guest_booking_service(student, hostel, guest_data, check_in_date, check_out_date):
+    """
+    Submit a guest room booking request.
+    Enforces:
+    - Overlap checking
+    - Policy rate application
+    """
+    from .selectors import get_guest_policy, get_guest_room_availability
+    
+    # 1. Eligibility: Check if student has no active damage fines (simplified rule)
+    if selectors.count_student_unpaid_fines(student.id.id) > 2:
+        raise GuestRoomPolicyError("Student has too many unpaid fines to request guest rooms.")
+
+    # 2. Date Validation
+    if check_in_date >= check_out_date:
+        raise GuestRoomPolicyError("Check-out date must be after check-in date.")
+    
+    if check_in_date < timezone.now().date():
+        raise GuestRoomPolicyError("Check-in date cannot be in the past.")
+
+    # 3. Policy & Rate
+    policy = get_guest_policy(hostel.hall_id)
+    if not policy:
+        raise GuestRoomPolicyError("This hostel has not configured a guest room policy yet.")
+    
+    # 4. Find Available Guest Room
+    available_guest_rooms = GuestRoom.objects.filter(hostel=hostel, is_active=True)
+    target_room = None
+    for gr in available_guest_rooms:
+        if get_guest_room_availability(gr.id, check_in_date, check_out_date):
+            target_room = gr.room
+            break
+            
+    if not target_room:
+        raise GuestRoomAvailabilityError("No guest rooms are available for the selected dates.")
+
+    # 5. UID Generation
+    import uuid
+    booking_uid = f"GRB-{uuid.uuid4().hex[:8].upper()}"
+    
+    # 6. Calculate Duration & Charges
+    nights = (check_out_date - check_in_date).days
+    total_charges = nights * policy.per_night_rate
+
+    booking = GuestRoomBooking.objects.create(
+        student=student,
+        hostel=hostel,
+        room=target_room,
+        booking_uid=booking_uid,
+        guest_name=guest_data.get('guest_name'),
+        guest_phone=guest_data.get('guest_phone'),
+        guest_email=guest_data.get('guest_email'),
+        guest_address=guest_data.get('guest_address', ''),
+        nationality=guest_data.get('nationality', ''),
+        visit_purpose=guest_data.get('visit_purpose'),
+        check_in_date=check_in_date,
+        check_out_date=check_out_date,
+        per_night_rate=policy.per_night_rate,
+        total_charges=total_charges,
+        status=BookingStatusChoices.PENDING
+    )
+    
+    return booking
+
+
+@transaction.atomic
+def process_booking_decision_service(booking_id, caretaker_user, decision, remarks="", room_id=None):
+    """Caretaker approves or rejects a booking request."""
+    booking = GuestRoomBooking.objects.select_for_update().get(id=booking_id)
+    
+    if booking.status != BookingStatusChoices.PENDING:
+        raise GuestRoomBookingError("Can only process pending bookings.")
+    
+    if decision == 'approved':
+        booking.status = BookingStatusChoices.APPROVED
+        if room_id:
+            try:
+                from .models import GuestRoom
+                gr = GuestRoom.objects.get(id=room_id)
+                booking.room = gr.room
+            except GuestRoom.DoesNotExist:
+                raise GuestRoomBookingError("Invalid room selected.")
+    elif decision == 'rejected':
+        booking.status = BookingStatusChoices.REJECTED
+    else:
+        raise GuestRoomBookingError(f"Invalid decision '{decision}'. Must be 'approved' or 'rejected'.")
+        
+    booking.caretaker_remarks = remarks
+    booking.save()
+    
+    # Notify Student
+    notify.send(
+        sender=caretaker_user,
+        recipient=booking.student.id.user,
+        verb=f"{decision}d your guest room booking",
+        action_object=booking,
+        description=f"Your booking {booking.booking_uid} has been {decision}d."
+    )
+    
+    return booking
+
+
+@transaction.atomic
+def process_checkin_service(booking_id, caretaker_user, id_proof_type, id_proof_number):
+    """Record guest check-in with ID verification."""
+    booking = GuestRoomBooking.objects.select_for_update().get(id=booking_id)
+    
+    if booking.status != BookingStatusChoices.APPROVED:
+        raise GuestRoomBookingError("Only approved bookings can be checked in.")
+    
+    booking.status = BookingStatusChoices.CHECKED_IN
+    booking.id_proof_type = id_proof_type
+    booking.id_proof_number = id_proof_number
+    booking.id_verified_at = timezone.now()
+    
+    # Update check-in date to the actual date
+    actual_in_date = timezone.now().date()
+    booking.check_in_date = actual_in_date
+    if booking.check_out_date <= actual_in_date:
+        from datetime import timedelta
+        booking.check_out_date = actual_in_date + timedelta(days=1)
+        
+    booking.save()
+
+    # Update Room Occupancy
+    room = booking.room
+    room.current_occupancy = min(room.capacity, room.current_occupancy + 1)
+    if room.current_occupancy >= room.capacity:
+        room.status = 'Occupied'
+    room.save()
+
+    return booking
+
+
+@transaction.atomic
+def process_checkout_service(booking_id, caretaker_user, condition_remarks, damage_severity, damage_charge=Decimal('0.00')):
+    """
+    Record guest check-out and inspection.
+    Automatically issues a fine if damage is recorded.
+    """
+    from .models import GuestRoomInspection, DamageSeverityChoices, FineCategoryChoices
+    
+    booking = GuestRoomBooking.objects.select_for_update().get(id=booking_id)
+    
+    if booking.status != BookingStatusChoices.CHECKED_IN:
+        raise GuestRoomBookingError("Booking must be in checked-in status for check-out.")
+    
+    # 1. Create Inspection Record
+    inspection = GuestRoomInspection.objects.create(
+        booking=booking,
+        conducted_by=caretaker_user,
+        damage_description=condition_remarks,
+        severity=damage_severity,
+        estimated_repair_cost=damage_charge,
+        damage_found=(damage_severity != 'None')
+    )
+    
+    # 2. Update Booking Status and recalculate duration
+    actual_out_date = timezone.now().date()
+    booking.check_out_date = actual_out_date
+    nights = (actual_out_date - booking.check_in_date).days
+    nights = max(1, nights) # Minimum 1 night charge
+    
+    booking.total_charges = nights * booking.per_night_rate
+    booking.status = BookingStatusChoices.COMPLETED
+    booking.save()
+
+    # 3. Update Room Occupancy
+    room = booking.room
+    room.current_occupancy = max(0, room.current_occupancy - 1)
+    if room.current_occupancy < room.capacity:
+        room.status = 'Available'
+    room.save()
+    
+    # 3. Automated Fine if Damage Exists
+    if damage_severity != DamageSeverityChoices.NONE or damage_charge > 0:
+        impose_fine(
+            student=booking.student,
+            hostel=booking.hostel,
+            imposed_by=caretaker_user,
+            category=FineCategoryChoices.PROPERTY_DAMAGE,
+            amount=damage_charge,
+            reason=f"Damage detected during guest room check-out ({booking.booking_uid}). {condition_remarks}"
+        )
+    
+    return booking, inspection

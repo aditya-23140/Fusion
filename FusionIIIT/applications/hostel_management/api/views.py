@@ -36,11 +36,38 @@ from applications.globals.models import Staff
 from applications.globals.models import Faculty
 from applications.hostel_management.models import (
     LeaveRequest, StudentAttendanceRecord, AttendanceStatus,
-    HostelComplaint, RoomAllocationChange,
-    HostelFine, StaffSchedule, HostelInventory, GuestRoomBooking,
+    HostelComplaint,
+    RoomAllocationChange,
+    HostelFine,
+    StaffSchedule,
     HostelNoticeBoard,
-    Hostel, Room, RoomAllotment, HostelStaffAssignment,
-    ComplaintStatusChoices, ComplaintCategoryChoices, StaffRoleChoices, FineStatusChoices
+    HostelInventory,
+    GuestRoom,
+    GuestRoomBooking,
+    GuestRoomPolicy,
+    GuestRoomInspection,
+    LeaveStatusChoices,
+    ComplaintStatusChoices,
+    ComplaintCategoryChoices,
+    ComplaintPriorityChoices,
+    FineStatusChoices,
+    AccommodationApplicationWindow,
+    AccommodationRequest,
+    RoomAllotment,
+    Hostel,
+    Room,
+    HostelTypeChoices,
+    RoomTypeChoices,
+    StaffRoleChoices,
+    HostelStatusChoices,
+    HostelStaffAssignment,
+    HostelAuditLog,
+    ComplaintHistory,
+    AllocationChangeStatusChoices, FineCategoryChoices, FineExtraDetail,
+    InventoryItem, InventoryDiscrepancy, InventoryAuditLog as InventoryAuditTrail, ResourceRequest,
+    InventoryCategory, InventoryCondition, DiscrepancyType, ResourceRequestType, ResourceRequestStatus,
+    Notice, NoticeReadStatus, NoticeStatus, NoticePriority,
+    BookingStatusChoices, DamageSeverityChoices
 )
 from . import serializers
 from .serializers import (
@@ -1226,118 +1253,199 @@ class InventoryRetrieveUpdateView(generics.RetrieveUpdateAPIView):
 # GUEST ROOM BOOKING VIEWS (HM-WF-112)
 # ══════════════════════════════════════════════════════════════
 
+# ══════════════════════════════════════════════════════════════
+# GUEST ROOM MANAGEMENT VIEWS (CHUNK 12)
+# ══════════════════════════════════════════════════════════════
+
+class GuestRoomPolicyView(generics.GenericAPIView):
+    """Manage hostel-specific guest room policies."""
+    permission_classes = [IsWardenOrCaretaker | IsHostelSuperAdmin]
+    serializer_class = serializers.GuestRoomPolicySerializer
+
+    def get(self, request, hall_id):
+        policy = selectors.get_guest_policy(hall_id)
+        if not policy:
+            return Response({"detail": "Policy not found for this hostel."}, status=404)
+        return Response(self.get_serializer(policy).data)
+
+    def post(self, request, hall_id):
+        hostel = get_object_or_404(Hostel, hall_id=hall_id)
+        # Check permission for this specific hostel
+        if not (request.user.is_superuser or selectors.list_assigned_hostels(request.user).filter(hall_id=hall_id).exists()):
+             return Response({"detail": "Not authorized for this hostel."}, status=403)
+             
+        policy = services.update_guest_policy_service(
+            hostel=hostel,
+            caretaker_user=request.user,
+            **request.data
+        )
+        return Response(self.get_serializer(policy).data)
+
+    def delete(self, request, hall_id):
+        hostel = get_object_or_404(Hostel, hall_id=hall_id)
+        if not (request.user.is_superuser or selectors.list_assigned_hostels(request.user).filter(hall_id=hall_id).exists()):
+             return Response({"detail": "Not authorized for this hostel."}, status=403)
+             
+        policy = selectors.get_guest_policy(hall_id)
+        if policy:
+            policy.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class GuestRoomRegistryViewSet(viewsets.ModelViewSet):
+    """Manage designating rooms as Guest-Eligible."""
+    permission_classes = [IsWardenOrCaretaker | IsHostelSuperAdmin]
+    serializer_class = serializers.GuestRoomSerializer
+
+    def get_queryset(self):
+        hall_id = self.request.query_params.get('hall_id')
+        return selectors.list_guest_rooms_registry(hall_id)
+
+    def create(self, request, *args, **kwargs):
+        room_id = request.data.get('room')
+        room = get_object_or_404(Room, id=room_id)
+        
+        # Check permission for the room's hostel
+        if not (request.user.is_superuser or selectors.list_assigned_hostels(request.user).filter(hall_id=room.hostel.hall_id).exists()):
+             return Response({"detail": "Not authorized for this hostel."}, status=403)
+             
+        try:
+            gr = services.register_guest_room_service(room.hostel, room, request.user)
+            return Response(self.get_serializer(gr).data, status=201)
+        except Exception as e:
+            return Response({"detail": str(e)}, status=400)
+
+    @action(detail=False, methods=['get'], url_path='available-rooms')
+    def available_rooms(self, request):
+        hall_id = request.query_params.get('hall_id')
+        if not hall_id:
+            return Response({"detail": "hall_id is required."}, status=400)
+        rooms = selectors.list_available_rooms_for_guest_designation(hall_id)
+        return Response(serializers.RoomSerializer(rooms, many=True).data)
+
+
 class GuestBookingListCreateView(generics.ListCreateAPIView):
-    """List guest bookings or request guest room."""
+    """Student requests or standard listing of bookings."""
     permission_classes = [IsAuthenticated]
-    serializer_class = GuestRoomBookingSerializer
 
     def get_serializer_class(self):
-        
-        """Use appropriate serializer based on request method."""
         if self.request.method == 'POST':
-            return GuestRoomBookingCreateSerializer
-        return GuestRoomBookingSerializer
+            return serializers.GuestRoomBookingCreateSerializer
+        return serializers.GuestRoomBookingSerializer
 
-    
     def get_queryset(self):
-        """Get bookings for user or all if staff."""
-        user = self.request.user
-        if user.is_staff:
-            return selectors.get_all_guest_bookings()
-        return selectors.get_student_guest_bookings(user)
+        filters = {}
+        if 'status' in self.request.query_params:
+            filters['status'] = self.request.query_params.get('status')
+        if 'hostel' in self.request.query_params:
+            filters['hostel'] = self.request.query_params.get('hostel')
+            
+        return selectors.list_guest_bookings_scoped(self.request.user, filters)
+
+    def create(self, request, *args, **kwargs):
+        print("INCOMING GUEST BOOKING DATA:", request.data)
+        serializer = self.get_serializer(data=request.data)
+        if not serializer.is_valid():
+            print("GUEST BOOKING VALIDATION ERRORS:", serializer.errors)
+        return super().create(request, *args, **kwargs)
+
     def perform_create(self, serializer):
-        """Request guest room via service."""
-        services.request_guest_room(
-            student=self.request.user,
-            guest_name=serializer.validated_data['guest_name'],
-            guest_phone=serializer.validated_data['guest_phone'],
-            arrival_date=serializer.validated_data['arrival_date'],
-            departure_date=serializer.validated_data['departure_date'],
-            purpose=serializer.validated_data['purpose'],
-            total_guests=serializer.validated_data['total_guests'],
-            guest_email=serializer.validated_data.get('guest_email', ''),
-            guest_address=serializer.validated_data.get('guest_address', ''),
-            nationality=serializer.validated_data.get('nationality', ''),
-            rooms_required=serializer.validated_data.get('rooms_required', 1),
-            room_type=serializer.validated_data.get('room_type', 'single')
-        )
+        from rest_framework.exceptions import ValidationError
+        try:
+            student = selectors.get_student(self.request.user)
+            if not student:
+                raise ValidationError("Only students can request guest rooms.")
+                
+            allotment = selectors.get_active_allotment_by_student(student)
+            if not allotment:
+                raise ValidationError("You must be residing in a hostel to book a guest room.")
+                
+            hostel = allotment.hostel
+            
+            services.create_guest_booking_service(
+                student=student,
+                hostel=hostel,
+                guest_data=serializer.validated_data,
+                check_in_date=serializer.validated_data['check_in_date'],
+                check_out_date=serializer.validated_data['check_out_date']
+            )
+        except Exception as e:
+            raise ValidationError({"detail": str(e)})
 
 
-class GuestBookingRetrieveUpdateView(generics.RetrieveUpdateAPIView):
-    """Retrieve or update guest booking."""
+class GuestBookingRetrieveUpdateView(generics.RetrieveAPIView):
+    """Retrieve details of a specific guest booking."""
     permission_classes = [IsAuthenticated]
-    serializer_class = GuestRoomBookingSerializer
-
-    def get_object(self):
-        """Get booking by ID."""
-        return get_object_or_404(GuestRoomBooking, pk=self.kwargs['pk'])
+    serializer_class = serializers.GuestRoomBookingSerializer
+    queryset = GuestRoomBooking.objects.all()
 
 
-class GuestBookingApproveView(generics.UpdateAPIView):
-    """Approve guest room booking."""
-    permission_classes = [IsAuthenticated]
-    serializer_class = GuestRoomBookingApprovalSerializer
+class GuestBookingApproveView(generics.GenericAPIView):
+    """Approve or Reject a booking."""
+    permission_classes = [IsWardenOrCaretaker | IsHostelSuperAdmin]
+    serializer_class = serializers.GuestRoomBookingApprovalSerializer
 
-    def get_object(self):
-        """Get booking by ID."""
-        return get_object_or_404(GuestRoomBooking, pk=self.kwargs['pk'])
-
-    def perform_update(self, serializer):
-        """Approve booking via service."""
-        booking = self.get_object()
-        services.approve_guest_booking(
-            booking_id=booking.id,
-            approved_by=self.request.user,
-            remarks=serializer.validated_data.get('review_remarks', '')
-        )
-
-
-class GuestBookingRejectView(generics.UpdateAPIView):
-    """Reject guest room booking."""
-    permission_classes = [IsAuthenticated]
-    serializer_class = GuestRoomBookingApprovalSerializer
-
-    def get_object(self):
-        """Get booking by ID."""
-        return get_object_or_404(GuestRoomBooking, pk=self.kwargs['pk'])
-
-    def perform_update(self, serializer):
-        """Reject booking via service."""
-        booking = self.get_object()
-        services.reject_guest_booking(
-            booking_id=booking.id,
-            rejection_reason=serializer.validated_data.get('review_remarks', '')
-        )
+    def post(self, request, pk):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        
+        try:
+            booking = services.process_booking_decision_service(
+                booking_id=pk,
+                caretaker_user=request.user,
+                decision=serializer.validated_data['decision'],
+                remarks=serializer.validated_data.get('remarks', ''),
+                room_id=serializer.validated_data.get('room_id')
+            )
+            return Response(serializers.GuestRoomBookingSerializer(booking).data)
+        except Exception as e:
+            return Response({"detail": str(e)}, status=400)
 
 
-class GuestBookingCheckInView(generics.UpdateAPIView):
-    """Check in guest."""
-    permission_classes = [IsAuthenticated]
-    serializer_class = GuestRoomBookingApprovalSerializer
+class GuestBookingCheckInView(generics.GenericAPIView):
+    """Caretaker records guest arrival."""
+    permission_classes = [IsWardenOrCaretaker | IsHostelSuperAdmin]
+    serializer_class = serializers.GuestRoomCheckInSerializer
 
-    def get_object(self):
-        """Get booking by ID."""
-        return get_object_or_404(GuestRoomBooking, pk=self.kwargs['pk'])
+    def post(self, request, pk):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        
+        try:
+            booking = services.process_checkin_service(
+                booking_id=pk,
+                caretaker_user=request.user,
+                id_proof_type=serializer.validated_data['id_proof_type'],
+                id_proof_number=serializer.validated_data['id_proof_number']
+            )
+            return Response(serializers.GuestRoomBookingSerializer(booking).data)
+        except Exception as e:
+            return Response({"detail": str(e)}, status=400)
 
-    def perform_update(self, serializer):
-        """Check in guest via service."""
-        booking = self.get_object()
-        services.check_in_guest(booking_id=booking.id)
 
+class GuestBookingCheckOutView(generics.GenericAPIView):
+    """Caretaker records guest departure and inspection."""
+    permission_classes = [IsWardenOrCaretaker | IsHostelSuperAdmin]
+    serializer_class = serializers.GuestRoomCheckOutSerializer
 
-class GuestBookingCheckOutView(generics.UpdateAPIView):
-    """Check out guest."""
-    permission_classes = [IsAuthenticated]
-    serializer_class = GuestRoomBookingApprovalSerializer
-
-    def get_object(self):
-        """Get booking by ID."""
-        return get_object_or_404(GuestRoomBooking, pk=self.kwargs['pk'])
-
-    def perform_update(self, serializer):
-        """Check out guest via service."""
-        booking = self.get_object()
-        services.check_out_guest(booking_id=booking.id)
+    def post(self, request, pk):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        
+        try:
+            booking, inspection = services.process_checkout_service(
+                booking_id=pk,
+                caretaker_user=request.user,
+                condition_remarks=serializer.validated_data['condition_remarks'],
+                damage_severity=serializer.validated_data['damage_severity'],
+                damage_charge=serializer.validated_data['damage_charge']
+            )
+            return Response({
+                "booking": serializers.GuestRoomBookingSerializer(booking).data,
+                "inspection": serializers.GuestRoomInspectionSerializer(inspection).data
+            })
+        except Exception as e:
+            return Response({"detail": str(e)}, status=400)
 
 
 # ══════════════════════════════════════════════════════════════

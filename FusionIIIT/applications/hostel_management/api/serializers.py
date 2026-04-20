@@ -32,7 +32,10 @@ from ..models import (
     HostelInventory,
     GuestRoom,
     GuestRoomBooking,
+    GuestRoomPolicy,
+    GuestRoomInspection,
     LeaveStatusChoices,
+    DamageSeverityChoices,
     ComplaintStatusChoices,
     ComplaintCategoryChoices,
     ComplaintPriorityChoices,
@@ -815,75 +818,125 @@ class ResourceRequestReviewSerializer(serializers.Serializer):
 # GUEST ROOM SERIALIZERS (HM-WF-112)
 # ══════════════════════════════════════════════════════════════
 
+# ══════════════════════════════════════════════════════════════
+# GUEST ROOM SERIALIZERS (CHUNK 12)
+# ══════════════════════════════════════════════════════════════
+
+class GuestRoomPolicySerializer(serializers.ModelSerializer):
+    """Serializer for hostel-specific guest booking rules."""
+    updated_by_name = serializers.CharField(source='updated_by.get_full_name', read_only=True)
+    
+    hall_id = serializers.CharField(source='hostel.hall_id', read_only=True)
+    
+    class Meta:
+        model = GuestRoomPolicy
+        fields = [
+            'id', 'hall_id', 'per_night_rate', 'max_duration_nights',
+            'fines_grace_threshold', 'updated_by', 'updated_by_name', 'updated_at'
+        ]
+        read_only_fields = ['id', 'updated_by', 'updated_at']
+
+
 class GuestRoomSerializer(serializers.ModelSerializer):
-    """Read-only serializer for Guest Room."""
-    hall_name = serializers.CharField(source='hall.hall_name', read_only=True)
+    """Registry serializer (Designating rooms as Guest-Eligible)."""
+    room_detail = RoomSerializer(source='room', read_only=True)
+    room_number = serializers.CharField(source='room.room_number', read_only=True)
+    floor = serializers.IntegerField(source='room.floor', read_only=True)
+    hostel_name = serializers.CharField(source='hostel.name', read_only=True)
+    is_occupied = serializers.SerializerMethodField()
     
     class Meta:
         model = GuestRoom
         fields = [
-            'id', 'hall', 'hall_name', 'room_number', 'room_type',
-            'capacity', 'status', 'created_at', 'updated_at'
+            'id', 'hostel', 'hostel_name', 'room', 'room_detail', 'room_number', 'floor',
+            'is_active', 'is_occupied', 'created_at'
         ]
-        read_only_fields = fields
+        read_only_fields = ['id', 'created_at']
+
+    def get_is_occupied(self, obj):
+        return obj.room.current_occupancy > 0
 
 
 class GuestRoomBookingSerializer(serializers.ModelSerializer):
-    """Read-only serializer for Guest Room Booking."""
-    student_name = serializers.CharField(source='student.id.user.username', read_only=True)
-    room_number = serializers.CharField(source='guest_room.room_number', read_only=True, allow_null=True)
+    """Detailed booking serializer for read operations."""
+    student_name = serializers.CharField(source='student.id.user.get_full_name', read_only=True)
+    student_roll = serializers.CharField(source='student.id.id', read_only=True)
+    room_number = serializers.CharField(source='room.room_number', read_only=True)
+    hostel_name = serializers.CharField(source='hostel.name', read_only=True)
     
     class Meta:
         model = GuestRoomBooking
         fields = [
-            'id', 'student', 'student_name', 'guest_room', 'room_number',
-            'guest_name', 'guest_phone', 'guest_email', 'guest_address',
-            'nationality', 'total_guests', 'purpose', 'arrival_date',
-            'arrival_time', 'departure_date', 'departure_time', 'rooms_required',
-            'room_type', 'status', 'review_remarks', 'created_at',
-            'updated_at', 'checked_in_at', 'checked_out_at'
+            'id', 'booking_uid', 'student', 'student_name', 'student_roll',
+            'hostel', 'hostel_name', 'room', 'room_number',
+            'guest_name', 'guest_phone', 'guest_email', 'visit_purpose',
+            'check_in_date', 'check_out_date', 'status', 'total_charges',
+            'id_proof_type', 'id_proof_number', 'id_verified_at',
+            'caretaker_remarks', 'created_at', 'updated_at'
         ]
         read_only_fields = fields
 
 
 class GuestRoomBookingCreateSerializer(serializers.ModelSerializer):
-    """Create serializer for Guest Room Booking."""
-    
+    """Validation for student booking requests."""
     class Meta:
         model = GuestRoomBooking
         fields = [
-            'guest_name', 'guest_phone', 'guest_email', 'guest_address',
-            'nationality', 'total_guests', 'purpose', 'arrival_date',
-            'departure_date',
-            'rooms_required', 'room_type'
+            'hostel', 'guest_name', 'guest_phone', 'guest_email', 
+            'visit_purpose', 'check_in_date', 'check_out_date',
+            'guest_address', 'nationality'
         ]
-    
-    def validate_guest_phone(self, value):
-        """Validate phone format."""
-        if not value or len(value) < 10:
-            raise serializers.ValidationError("Phone number must be at least 10 characters.")
+        extra_kwargs = {
+            'hostel': {'required': False}
+        }
+
+    def validate_visit_purpose(self, value):
+        if not value or len(value.strip()) < 10:
+            raise serializers.ValidationError("Purpose of visit must be at least 10 characters.")
         return value
-    
-    def validate_total_guests(self, value):
-        """Validate total_guests."""
-        if value <= 0:
-            raise serializers.ValidationError("Total guests must be greater than 0.")
-        if value > 100:
-            raise serializers.ValidationError("Total guests cannot exceed 100.")
-        return value
-    
+
     def validate(self, data):
-        """Validate arrival and departure dates."""
-        if data['arrival_date'] < timezone.now().date():
-            raise serializers.ValidationError("Arrival date cannot be in the past.")
-        if data['departure_date'] <= data['arrival_date']:
-            raise serializers.ValidationError("Departure date must be after arrival date.")
+        if data['check_in_date'] < timezone.now().date():
+            raise serializers.ValidationError("Check-in date cannot be in the past.")
+        if data['check_out_date'] <= data['check_in_date']:
+            raise serializers.ValidationError("Check-out date must be after check-in date.")
         
-        duration = (data['departure_date'] - data['arrival_date']).days
-        if duration > 30:
-            raise serializers.ValidationError("Booking duration cannot exceed 30 days.")
-        
+        duration = (data['check_out_date'] - data['check_in_date']).days
+        if duration > 15: # Standard limit
+            raise serializers.ValidationError("Booking duration cannot exceed 15 days.")
+            
         return data
+
+
+class GuestRoomCheckInSerializer(serializers.Serializer):
+    """Verification for guest check-in."""
+    id_proof_type = serializers.CharField(max_length=50)
+    id_proof_number = serializers.CharField(max_length=50)
+
+
+class GuestRoomInspectionSerializer(serializers.ModelSerializer):
+    """Output for inspection records."""
+    inspected_by_name = serializers.CharField(source='conducted_by.get_full_name', read_only=True)
+    condition_remarks = serializers.CharField(source='damage_description', read_only=True)
+    damage_severity = serializers.CharField(source='severity', read_only=True)
+    damage_charge = serializers.DecimalField(source='estimated_repair_cost', max_digits=10, decimal_places=2, read_only=True)
+    inspected_at = serializers.DateTimeField(source='inspection_at', read_only=True)
+    
+    class Meta:
+        model = GuestRoomInspection
+        fields = [
+            'id', 'booking', 'conducted_by', 'inspected_by_name',
+            'condition_remarks', 'damage_severity', 'damage_charge', 'inspected_at'
+        ]
+        read_only_fields = fields
+
+
+class GuestRoomCheckOutSerializer(serializers.Serializer):
+    """Input for inspection during check-out."""
+    from ..models import DamageSeverityChoices
+    condition_remarks = serializers.CharField(max_length=500)
+    damage_severity = serializers.ChoiceField(choices=DamageSeverityChoices.choices)
+    damage_charge = serializers.DecimalField(max_digits=10, decimal_places=2, default=0.00)
 
 
 # ...existing code...
@@ -990,7 +1043,9 @@ class RoomVacationRequestVerifySerializer(serializers.Serializer):
 
 class GuestRoomBookingApprovalSerializer(serializers.Serializer):
     """Serializer for approving/rejecting guest room bookings."""
-    review_remarks = serializers.CharField(required=False, allow_blank=True, max_length=500)
+    decision = serializers.ChoiceField(choices=['approved', 'rejected'])
+    remarks = serializers.CharField(required=False, allow_blank=True, max_length=500)
+    room_id = serializers.IntegerField(required=False, allow_null=True)
 
 
 class ExtendedStayRequestApprovalSerializer(serializers.Serializer):

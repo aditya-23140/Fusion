@@ -23,6 +23,9 @@ inventory_router.register('discrepancies', views.InventoryDiscrepancyViewSet, ba
 inventory_router.register('audit-trail', views.InventoryAuditTrailViewSet, basename='inventory-audit-trail')
 inventory_router.register('resource-requests', views.ResourceRequestViewSet, basename='resource-request')
 
+guest_registry_router = DefaultRouter()
+guest_registry_router.register('registry', views.GuestRoomRegistryViewSet, basename='guest-room-registry')
+
 # ══════════════════════════════════════════════════════════════
 # HOSTEL SETUP FOUNDATION ROUTES (Modernized)
 # ══════════════════════════════════════════════════════════════
@@ -130,16 +133,14 @@ notice_patterns = [
     path('history/', views.NoticeHistoryView.as_view(), name='notice-history'),
 ]
 
-# ══════════════════════════════════════════════════════════════
-# GUEST ROOM BOOKING ROUTES (HM-WF-112)
-# ══════════════════════════════════════════════════════════════
 guest_booking_patterns = [
-    path('', views.GuestBookingListCreateView.as_view(), name='guest-booking-list-create'),
-    path('<int:pk>/', views.GuestBookingRetrieveUpdateView.as_view(), name='guest-booking-detail'),
-    path('<int:pk>/approve/', views.GuestBookingApproveView.as_view(), name='guest-booking-approve'),
-    path('<int:pk>/reject/', views.GuestBookingRejectView.as_view(), name='guest-booking-reject'),
-    path('<int:pk>/check-in/', views.GuestBookingCheckInView.as_view(), name='guest-booking-check-in'),
-    path('<int:pk>/check-out/', views.GuestBookingCheckOutView.as_view(), name='guest-booking-check-out'),
+    path('', include(guest_registry_router.urls)),
+    path('policy/<str:hall_id>/', views.GuestRoomPolicyView.as_view(), name='guest-room-policy'),
+    path('bookings/', views.GuestBookingListCreateView.as_view(), name='guest-booking-list-create'),
+    path('bookings/<int:pk>/', views.GuestBookingRetrieveUpdateView.as_view(), name='guest-booking-detail'),
+    path('bookings/<int:pk>/approve/', views.GuestBookingApproveView.as_view(), name='guest-booking-approve'),
+    path('bookings/<int:pk>/check-in/', views.GuestBookingCheckInView.as_view(), name='guest-booking-check-in'),
+    path('bookings/<int:pk>/check-out/', views.GuestBookingCheckOutView.as_view(), name='guest-booking-check-out'),
 ]
 
 # ══════════════════════════════════════════════════════════════
