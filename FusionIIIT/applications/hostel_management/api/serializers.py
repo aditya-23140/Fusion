@@ -49,10 +49,10 @@ from ..models import (
     HostelStaffAssignment,
     HostelAuditLog,
     ComplaintHistory,
-    FineCategoryChoices,
-    FineExtraDetail,
+    AllocationChangeStatusChoices, FineCategoryChoices, FineExtraDetail,
     InventoryItem, InventoryDiscrepancy, InventoryAuditLog as InventoryAuditTrail, ResourceRequest,
-    InventoryCategory, InventoryCondition, DiscrepancyType, ResourceRequestType, ResourceRequestStatus
+    InventoryCategory, InventoryCondition, DiscrepancyType, ResourceRequestType, ResourceRequestStatus,
+    Notice, NoticeReadStatus, NoticeStatus, NoticePriority
 )
 from applications.academic_information.models import Student
 from applications.globals.models import Staff, Faculty
@@ -893,8 +893,56 @@ class GuestRoomBookingCreateSerializer(serializers.ModelSerializer):
 # NOTICE BOARD SERIALIZERS (HM-WF-110)
 # ══════════════════════════════════════════════════════════════
 
+class NoticeSerializer(serializers.ModelSerializer):
+    """
+    Refined Notice Serializer (HM-WF-110).
+    Enforces Title (5-200) and Description (20-5000) rules.
+    """
+    hostel_name = serializers.CharField(source='hostel.hall_id', read_only=True)
+    created_by_name = serializers.CharField(source='created_by.username', read_only=True)
+    is_read = serializers.SerializerMethodField()
+    read_count = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Notice
+        fields = [
+            'id', 'notice_uid', 'hostel', 'hostel_name', 'created_by', 'created_by_name',
+            'title', 'description', 'priority', 'start_date', 'end_date', 'status',
+            'attachment', 'is_read', 'read_count', 'created_at', 'updated_at'
+        ]
+        read_only_fields = ['id', 'notice_uid', 'created_by', 'created_at', 'updated_at']
+
+    def get_is_read(self, obj):
+        request = self.context.get('request')
+        if request and request.user.is_authenticated:
+            from ..selectors import get_notice_read_status
+            return get_notice_read_status(obj.id, request.user)
+        return False
+
+    def get_read_count(self, obj):
+        from ..selectors import get_notice_read_count
+        return get_notice_read_count(obj.id)
+
+    def validate_title(self, value):
+        if len(value) < 5 or len(value) > 200:
+            raise serializers.ValidationError("Title must be between 5 and 200 characters.")
+        return value
+
+    def validate_description(self, value):
+        if len(value) < 20 or len(value) > 5000:
+            raise serializers.ValidationError("Description must be between 20 and 5000 characters.")
+        return value
+
+
+class NoticeReadStatusSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = NoticeReadStatus
+        fields = '__all__'
+
+
 class HostelNoticeBoardSerializer(serializers.ModelSerializer):
     """
+    LEGACY SERIALIZER - DEPRECATED
     Serializer for Notice Board.
     Enforces:
     - BR-HM-029: Notice Content Validation

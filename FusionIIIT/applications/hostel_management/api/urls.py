@@ -125,8 +125,9 @@ inventory_patterns = [
 # NOTICE BOARD ROUTES (HM-WF-110)
 # ══════════════════════════════════════════════════════════════
 notice_patterns = [
-    path('', views.NoticeListView.as_view(), name='notice-list'),
-    path('<int:pk>/', views.NoticeRetrieveView.as_view(), name='notice-detail'),
+    path('', views.NoticeListCreateView.as_view(), name='notice-list'),
+    path('<int:pk>/', views.NoticeDetailView.as_view(), name='notice-detail'),
+    path('history/', views.NoticeHistoryView.as_view(), name='notice-history'),
 ]
 
 # ══════════════════════════════════════════════════════════════

@@ -52,7 +52,8 @@ from .serializers import (
     HostelFineSerializer, HostelFinePaymentSerializer, HostelFineWaiverSerializer,
     StaffScheduleSerializer, HostelInventorySerializer,
     GuestRoomBookingSerializer, GuestRoomBookingCreateSerializer, GuestRoomBookingApprovalSerializer,
-    HostelNoticeBoardSerializer, StudentAttendanceRecordSerializer,
+    HostelNoticeBoardSerializer, NoticeSerializer, NoticeReadStatusSerializer,
+    StudentAttendanceRecordSerializer,
     InventoryItemSerializer, InventoryInspectionSerializer, InventoryItemUpdateSerializer,
     InventoryDiscrepancySerializer, InventoryAuditTrailSerializer,
     ResourceRequestSerializer, ResourceRequestCreateSerializer, ResourceRequestReviewSerializer
@@ -1344,42 +1345,90 @@ class GuestBookingCheckOutView(generics.UpdateAPIView):
 # NOTICE BOARD VIEWS (HM-WF-110)
 # ══════════════════════════════════════════════════════════════
 
-class NoticeListView(generics.ListCreateAPIView):
-    """List all active notices for current hall or create a new notice."""
+class NoticeListCreateView(generics.ListCreateAPIView):
+    """
+    List active notices or create a new notice (HM-WF-110).
+    - Students: See scoped active notices.
+    - Staff: See all notices for their assigned hostels.
+    """
     permission_classes = [IsAuthenticated]
-    serializer_class = HostelNoticeBoardSerializer
+    serializer_class = NoticeSerializer
     pagination_class = StandardPagination
 
     def get_queryset(self):
-        """Get active notices for the hall."""
-        hall_id = self.request.query_params.get('hall_id')
-        if hall_id:
-            return selectors.list_active_notices(hall_id)
-        # Return empty if no hall specified
-        return HostelNoticeBoard.objects.none()
+        from ..selectors import list_active_notices_for_student, list_notices_for_staff, is_user_warden_or_caretaker
+        user = self.request.user
+        if user.is_superuser or user.is_staff or is_user_warden_or_caretaker(user):
+            return list_notices_for_staff(user)
+        return list_active_notices_for_student(user)
 
-    def perform_create(self, serializer):
-        """Create notice with current user as poster and auto-assign hall."""
-        from rest_framework import serializers as drf_serializers
+    def create(self, request, *args, **kwargs):
+        from ..services import create_notice
+        from rest_framework import status
+        from rest_framework.response import Response
+
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
         
-        # Get hall_id from request data or query params
-        hall_id = self.request.data.get('hall_id') or self.request.query_params.get('hall_id')
+        # Pre-process data for the service
+        # Service expects 'hostel_id'
+        data = serializer.validated_data.copy()
+        hostel_obj = data.pop('hostel', None)
+        data['hostel_id'] = hostel_obj.pk if hostel_obj else None
         
-        if not hall_id:
-            raise drf_serializers.ValidationError({'hall_id': 'hall_id is required to post a notice'})
+        attachment = request.FILES.get('attachment')
         
-        hall = get_object_or_404(Hostel, pk=hall_id)
-        serializer.save(posted_by=self.request.user, hall=hall)
+        # Call the service with validated and mapped data
+        notice = create_notice(request.user, data, attachment=attachment)
+        
+        # Return serialized data of the created object
+        serializer = self.get_serializer(notice)
+        return Response(serializer.data, status=status.HTTP_201_CREATED)
 
 
-class NoticeRetrieveView(generics.RetrieveAPIView):
-    """Retrieve a specific notice."""
+class NoticeDetailView(generics.RetrieveUpdateDestroyAPIView):
+    """
+    Retrieve, update or delete a notice.
+    Students: Mark as read on retrieval.
+    """
     permission_classes = [IsAuthenticated]
-    serializer_class = HostelNoticeBoardSerializer
+    serializer_class = NoticeSerializer
 
     def get_object(self):
-        """Get notice by ID."""
-        return get_object_or_404(HostelNoticeBoard, pk=self.kwargs['pk'])
+        from ..selectors import get_notice
+        notice = get_notice(self.kwargs['pk'])
+        if not notice:
+             from django.http import Http404
+             raise Http404("Notice not found")
+             
+        # Mark as read for students on GET
+        if self.request.method == 'GET' and not (self.request.user.is_staff or self.request.user.is_superuser):
+            from ..services import mark_notice_as_read
+            mark_notice_as_read(notice.id, self.request.user)
+            
+        return notice
+
+    def perform_update(self, serializer):
+        from ..services import update_notice
+        attachment = self.request.FILES.get('attachment')
+        update_notice(self.kwargs['pk'], self.request.data, self.request.user, attachment=attachment)
+
+    def perform_destroy(self, instance):
+        from ..services import delete_notice
+        delete_notice(instance.id, self.request.user)
+
+
+class NoticeHistoryView(generics.ListAPIView):
+    """
+    View archived or expired notices history.
+    """
+    permission_classes = [IsAuthenticated]
+    serializer_class = NoticeSerializer
+    pagination_class = StandardPagination
+
+    def get_queryset(self):
+        from ..selectors import list_notice_history
+        return list_notice_history(self.request.user)
 
 
 # ══════════════════════════════════════════════════════════════

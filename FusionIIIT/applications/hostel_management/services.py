@@ -14,14 +14,15 @@ from decimal import Decimal
 from .models import (
     LeaveRequest, StudentAttendanceRecord, AttendanceStatus,
     HostelComplaint, RoomAllocationChange,
-    HostelFine,
+    HostelFine, StaffSchedule, HostelInventory, HostelNoticeBoard,
     GuestRoomBooking, GuestRoom, Hostel, Room, RoomAllotment,
     HostelStaffAssignment,
     AccommodationApplicationWindow, AccommodationRequest,
     StaffRoleChoices, RoomSetupStatusChoices,
     ComplaintHistory, ComplaintCategoryChoices, ComplaintStatusChoices,
     LeaveStatusChoices, FineStatusChoices, BookingStatusChoices,
-    AllocationChangeStatusChoices, FineCategoryChoices, FineExtraDetail
+    AllocationChangeStatusChoices, FineCategoryChoices, FineExtraDetail,
+    Notice, NoticeReadStatus, NoticeStatus, NoticePriority
 )
 from notifications.signals import notify
 from django.db import transaction
@@ -2092,3 +2093,128 @@ def resolve_discrepancy(discrepancy_id, user):
     discrepancy.delete()
     
     return item
+
+
+# ══════════════════════════════════════════════════════════════
+# HM-WF-110: NOTICE BOARD SERVICES
+# ══════════════════════════════════════════════════════════════
+
+@transaction.atomic
+def create_notice(user, data, attachment=None):
+    """
+    Create a new notice and handle priority side-effects.
+    """
+    from rest_framework.exceptions import PermissionDenied
+    from .selectors import is_user_warden_or_caretaker, list_assigned_hostels
+    
+    # Permission check (Warden/Caretaker only)
+    if not (user.is_superuser or is_user_warden_or_caretaker(user)):
+        raise PermissionDenied("Only staff members can post notices.")
+
+    hostel_id = data.get('hostel_id') or data.get('hostel')
+    if hostel_id == 'all' or not hostel_id:
+        hostel_id = None
+        
+    # If hostel_id is a model object (legacy or direct from serializer)
+    if hasattr(hostel_id, 'pk'):
+        hostel_id = hostel_id.pk
+        
+    # Global Notice Check: Only Super Admins can post to all hostels
+    if hostel_id is None and not user.is_superuser:
+         raise PermissionDenied("Only Super Admins can post global notices visible to all hostels.")
+
+    if hostel_id and not user.is_superuser:
+        assigned = list_assigned_hostels(user).filter(hall_id=hostel_id).exists()
+        if not assigned:
+            raise PermissionDenied(f"You are not authorized to post notices for hostel {hostel_id}.")
+
+    # Generate unique UID
+    import uuid
+    notice_uid = f"NTC-{uuid.uuid4().hex[:8].upper()}"
+
+    notice = Notice.objects.create(
+        hostel_id=hostel_id,
+        created_by=user,
+        title=data.get('title'),
+        description=data.get('description'),
+        priority=data.get('priority', NoticePriority.NORMAL),
+        start_date=data.get('start_date'),
+        end_date=data.get('end_date'),
+        status=data.get('status', NoticeStatus.PUBLISHED),
+        attachment=attachment,
+        notice_uid=notice_uid
+    )
+
+    # BR-HM-033: Immediate push notification for Urgent notices
+    if notice.priority == NoticePriority.URGENT and notice.status == NoticeStatus.PUBLISHED:
+        _trigger_urgent_notice_notification(notice)
+
+    return notice
+
+
+@transaction.atomic
+def update_notice(notice_id, data, user, attachment=None):
+    """Update an existing notice."""
+    notice = Notice.objects.get(id=notice_id)
+    
+    if not user.is_superuser and notice.created_by != user:
+         raise PermissionError("You can only edit notices created by yourself.")
+
+    # Update fields
+    notice.title = data.get('title', notice.title)
+    notice.description = data.get('description', notice.description)
+    notice.priority = data.get('priority', notice.priority)
+    notice.start_date = data.get('start_date', notice.start_date)
+    notice.end_date = data.get('end_date', notice.end_date)
+    notice.status = data.get('status', notice.status)
+    
+    if attachment:
+        notice.attachment = attachment
+        
+    notice.save()
+    return notice
+
+
+@transaction.atomic
+def delete_notice(notice_id, user):
+    """Delete a notice."""
+    notice = Notice.objects.get(id=notice_id)
+    if not user.is_superuser and notice.created_by != user:
+         raise PermissionError("You can only delete notices created by yourself.")
+    notice.delete()
+    return True
+
+
+@transaction.atomic
+def mark_notice_as_read(notice_id, user):
+    """Record that a student has read a notice."""
+    from .selectors import get_student
+    student = get_student(user)
+    if not student:
+        return None
+        
+    read_status, created = NoticeReadStatus.objects.get_or_create(
+        notice_id=notice_id,
+        student=student
+    )
+    return read_status
+
+
+@transaction.atomic
+def archive_expired_notices():
+    """Daily task to archive notices past their end date."""
+    now = timezone.now().date()
+    updated_count = Notice.objects.filter(
+        status=NoticeStatus.PUBLISHED,
+        end_date__lt=now
+    ).update(status=NoticeStatus.ARCHIVED)
+    return updated_count
+
+
+def _trigger_urgent_notice_notification(notice):
+    """
+    Send push notification for urgent hostel notice.
+    Placeholder for notification engine integration.
+    """
+    # Logic to identify students in target hostel and send notification
+    pass

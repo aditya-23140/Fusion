@@ -101,6 +101,18 @@ class ResourceRequestStatus(models.TextChoices):
     REJECTED = "Rejected", "Rejected"
 
 
+class NoticePriority(models.TextChoices):
+    NORMAL = "Normal", "Normal"
+    IMPORTANT = "Important", "Important"
+    URGENT = "Urgent", "Urgent"
+
+
+class NoticeStatus(models.TextChoices):
+    DRAFT = "Draft", "Draft"
+    PUBLISHED = "Published", "Published"
+    ARCHIVED = "Archived", "Archived"
+
+
 class RoomChangeStatusChoices(models.TextChoices):
     """Room change request status."""
     PENDING = "pending", "Pending"
@@ -545,8 +557,48 @@ class StaffSchedule(models.Model):
         return str(self.staff) + ' - ' + str(self.day_of_week) + ' ' + str(self.start_time) + '->' + str(self.end_time)
     
 
+class Notice(models.Model):
+    """
+    Refined Notice entity (HM-WF-110).
+    Manages the lifecycle from draft to archival with priority and scoping.
+    """
+    hostel = models.ForeignKey(Hostel, on_delete=models.CASCADE, related_name='notices_new', null=True, blank=True)
+    created_by = models.ForeignKey(User, on_delete=models.CASCADE, related_name='created_notices')
+    title = models.CharField(max_length=200)
+    description = models.TextField()
+    priority = models.CharField(max_length=15, choices=NoticePriority.choices, default=NoticePriority.NORMAL)
+    start_date = models.DateField(default=timezone.now)
+    end_date = models.DateField()
+    status = models.CharField(max_length=15, choices=NoticeStatus.choices, default=NoticeStatus.DRAFT)
+    attachment = models.FileField(upload_to='hostel/notices/attachments/', null=True, blank=True)
+    notice_uid = models.CharField(max_length=50, unique=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'hostel_management_notice'
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f"[{self.priority}] {self.title} ({self.status})"
+
+
+class NoticeReadStatus(models.Model):
+    """
+    Tracks if a student has viewed a notice.
+    """
+    notice = models.ForeignKey(Notice, on_delete=models.CASCADE, related_name='read_statuses')
+    student = models.ForeignKey(Student, on_delete=models.CASCADE, related_name='notices_read')
+    read_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'hostel_management_noticereadstatus'
+        unique_together = ['notice', 'student']
+
+
 class HostelNoticeBoard(models.Model):
     """
+    LEGACY MODEL - DEPRECATED
     Records notices of various Hall of Residences.
 
     'hall' refers to the related Hall of Residence.

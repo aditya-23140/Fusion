@@ -30,7 +30,7 @@ from .models import (
     HostelTypeChoices, RoomTypeChoices,
     Hostel, Room, HostelStaffAssignment,
     InventoryItem, InventoryDiscrepancy, InventoryAuditLog, ResourceRequest,
-    ResourceRequestStatus
+    ResourceRequestStatus, Notice, NoticeReadStatus, NoticeStatus
 )
 from applications.academic_information.models import Student
 from applications.globals.models import Staff, Faculty
@@ -1386,3 +1386,89 @@ def list_inventory_audit_logs(user, item_id=None):
         
     assigned_hostel_ids = list_assigned_hostels(user).values_list('hall_id', flat=True)
     return queryset.filter(hostel_id__in=assigned_hostel_ids)
+
+
+# ══════════════════════════════════════════════════════════════
+# HM-WF-110: NOTICE BOARD SELECTORS
+# ══════════════════════════════════════════════════════════════
+
+def get_notice(notice_id):
+    """Retrieve a specific notice by ID."""
+    return Notice.objects.filter(id=notice_id).select_related('hostel', 'created_by').first()
+
+
+def list_active_notices_for_student(user):
+    """
+    List active/published notices for a student.
+    Matches: (hostel=None OR hostel=student_hostel) AND status=PUBLISHED.
+    """
+    student = get_student(user)
+    if not student:
+        return Notice.objects.none()
+
+    # Get active allotment to determine student's hostel
+    allotment = get_active_allotment_by_student(student)
+    hostel_id = allotment.hostel_id if allotment else None
+
+    now = timezone.now().date()
+    
+    queryset = Notice.objects.filter(
+        status=NoticeStatus.PUBLISHED,
+        start_date__lte=now,
+        end_date__gte=now
+    ).filter(
+        models.Q(hostel__isnull=True) | models.Q(hostel_id=hostel_id)
+    ).select_related('hostel', 'created_by')
+
+    return queryset.order_by('-priority', '-created_at')
+
+
+def list_notices_for_staff(user):
+    """
+    List notices for staff (Warden/Caretaker).
+    Scoped to hostels they are assigned to manage.
+    """
+    if user.is_superuser:
+        return Notice.objects.all().select_related('hostel', 'created_by')
+        
+    assigned_hostel_ids = list_assigned_hostels(user).values_list('hall_id', flat=True)
+    return Notice.objects.filter(
+        models.Q(hostel_id__in=assigned_hostel_ids) | models.Q(hostel__isnull=True)
+    ).select_related('hostel', 'created_by').order_by('-created_at')
+
+
+def list_notice_history(user):
+    """
+    List archived or expired notices.
+    """
+    now = timezone.now().date()
+    queryset = Notice.objects.filter(
+        models.Q(status=NoticeStatus.ARCHIVED) | models.Q(end_date__lt=now)
+    )
+
+    if user.is_superuser or user.is_staff or is_user_warden_or_caretaker(user):
+        if not user.is_superuser:
+            assigned_hostel_ids = list_assigned_hostels(user).values_list('hall_id', flat=True)
+            queryset = queryset.filter(hostel_id__in=assigned_hostel_ids)
+    else:
+        student = get_student(user)
+        allotment = get_active_allotment_by_student(student)
+        hostel_id = allotment.hostel_id if allotment else None
+        queryset = queryset.filter(
+            models.Q(hostel__isnull=True) | models.Q(hostel_id=hostel_id)
+        )
+
+    return queryset.select_related('hostel', 'created_by').order_by('-end_date')
+
+
+def get_notice_read_status(notice_id, user):
+    """Check if a specific user has read a notice."""
+    student = get_student(user)
+    if not student:
+        return False
+    return NoticeReadStatus.objects.filter(notice_id=notice_id, student=student).exists()
+
+
+def get_notice_read_count(notice_id):
+    """Get total number of students who read a notice."""
+    return NoticeReadStatus.objects.filter(notice_id=notice_id).count()
