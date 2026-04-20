@@ -54,3 +54,32 @@ class IsAssignedToHostel(BasePermission):
         # Check robust list of assigned hostels for the user
         assigned_hostels = selectors.list_assigned_hostels(request.user)
         return assigned_hostels.filter(hall_id=hostel_id).exists()
+
+
+class IsWardenOrAdmin(BasePermission):
+    """
+    Permission for Super Admin OR assigned Warden of the request's hostel.
+    Used for reviewing resource requests.
+    """
+    message = "You only have review authority over requests from your assigned hostels."
+
+    def has_permission(self, request, view):
+        if not (request.user and request.user.is_authenticated):
+            return False
+        if request.user.is_superuser:
+            return True
+        # Wardens can view lists; object-level check handles approval
+        return selectors.is_user_warden_or_caretaker(request.user)
+
+    def has_object_permission(self, request, view, obj):
+        if request.user.is_superuser:
+            return True
+        
+        # Ensure user is a warden of the hostel the request belongs to
+        if not selectors.is_user_warden(request.user):
+            return False
+
+        assigned_hostels = selectors.list_assigned_hostels(request.user)
+        # Check if the request's hostel is in user's assigned list
+        hostel_id = getattr(obj, 'hostel_id', None) or getattr(obj.hostel, 'hall_id', None)
+        return assigned_hostels.filter(hall_id=hostel_id).exists()

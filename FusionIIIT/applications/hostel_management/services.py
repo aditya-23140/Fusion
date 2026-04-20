@@ -1772,3 +1772,323 @@ def mark_fine_as_paid(fine_id, user):
     fine.save()
     
     return fine
+
+
+# ══════════════════════════════════════════════════════════════
+# MODERN INVENTORY SERVICES
+# ══════════════════════════════════════════════════════════════
+
+@transaction.atomic
+def record_inventory_inspection(item_id, actual_qty, condition, performer, remarks=""):
+    """
+    Record an inventory inspection (HM-UC-020).
+    - BR-HM-021.a: Create discrepancy if actual != expected or condition Damaged/Missing
+    - BR-HM-031.a: Write InventoryAuditLog
+    """
+    from .models import InventoryItem, InventoryDiscrepancy, InventoryAuditLog, DiscrepancyType, InventoryCondition
+    
+    item = InventoryItem.objects.select_for_update().filter(id=item_id).first()
+    if not item:
+        raise HostelManagementException("Inventory item not found.")
+    
+    old_qty = item.current_quantity
+    old_condition = item.condition
+    expected_qty = item.expected_quantity
+    
+    # Check for discrepancy
+    has_discrepancy = (actual_qty != expected_qty) or (condition in [InventoryCondition.DAMAGED, InventoryCondition.MISSING])
+    
+    if has_discrepancy:
+        d_type = DiscrepancyType.MISSING
+        if condition == InventoryCondition.DAMAGED:
+            d_type = DiscrepancyType.DAMAGED
+        elif actual_qty < expected_qty:
+            d_type = DiscrepancyType.MISSING
+        elif actual_qty == 0 and expected_qty > 0:
+            d_type = DiscrepancyType.DEPLETED
+
+        InventoryDiscrepancy.objects.create(
+            item=item,
+            hostel=item.hostel,
+            discrepancy_type=d_type,
+            expected_qty=expected_qty,
+            actual_qty=actual_qty,
+            condition=condition,
+            remarks=remarks or f"Automated discrepancy reported during inspection. Condition: {condition}",
+            reported_by=performer
+        )
+
+    # Write Audit Log
+    InventoryAuditLog.objects.create(
+        item=item,
+        hostel=item.hostel,
+        action="Inspected",
+        old_qty=old_qty,
+        new_qty=actual_qty,
+        old_condition=old_condition,
+        new_condition=condition,
+        performed_by=performer,
+        remarks=remarks
+    )
+
+    # Update item
+    item.current_quantity = actual_qty
+    item.condition = condition
+    item.last_inspected_at = timezone.now()
+    item.save()
+    
+    return item
+
+
+@transaction.atomic
+def update_inventory_record(item_id, quantity, condition, performer, remarks=""):
+    """
+    Direct inventory update (HM-UC-021).
+    - BR-HM-031.a: Write InventoryAuditLog
+    """
+    from .models import InventoryItem, InventoryAuditLog
+    
+    item = InventoryItem.objects.select_for_update().filter(id=item_id).first()
+    if not item:
+        raise HostelManagementException("Inventory item not found.")
+    
+    old_qty = item.current_quantity
+    old_condition = item.condition
+    
+    # Write Audit Log
+    InventoryAuditLog.objects.create(
+        item=item,
+        hostel=item.hostel,
+        action="Updated",
+        old_qty=old_qty,
+        new_qty=quantity,
+        old_condition=old_condition,
+        new_condition=condition,
+        performed_by=performer,
+        remarks=remarks
+    )
+
+    # Update item
+    item.current_quantity = quantity
+    item.condition = condition
+    item.save()
+    
+    return item
+
+
+def submit_resource_request(hostel_id, requester, request_type, category, item_name, quantity, justification):
+    """
+    Submit resource procurement request (HM-UC-022).
+    - BR-HM-030.a/b: Mandatory fields and quantity validation
+    """
+    from .models import ResourceRequest, Hostel, ResourceRequestType
+    
+    if not all([hostel_id, request_type, item_name, quantity, justification]):
+        raise HostelManagementException("All fields (hostel, type, item, quantity, justification) are mandatory.")
+        
+    if quantity <= 0:
+        raise HostelManagementException("Quantity must be a positive integer.")
+        
+    hostel = Hostel.objects.filter(hall_id=hostel_id).first()
+    if not hostel:
+        raise HostelManagementException("Hostel not found.")
+        
+    request = ResourceRequest.objects.create(
+        hostel=hostel,
+        requested_by=requester,
+        request_type=request_type,
+        category=category,
+        item_name=item_name,
+        quantity=quantity,
+        justification=justification
+    )
+    return request
+
+
+@transaction.atomic
+def review_resource_request(request_id, reviewer, status, remarks=""):
+    """
+    Review resource request (HM-UC-023) - Admin only.
+    """
+    from .models import ResourceRequest, ResourceRequestStatus
+    
+    request = ResourceRequest.objects.select_for_update().filter(id=request_id).first()
+    if not request:
+        raise HostelManagementException("Resource request not found.")
+        
+    if status not in [ResourceRequestStatus.APPROVED, ResourceRequestStatus.REJECTED]:
+        raise HostelManagementException("Invalid status for review.")
+        
+    request.status = status
+    request.reviewed_by = reviewer
+    request.reviewed_at = timezone.now()
+    if remarks:
+        request.justification += f"\n\nReviewer Remarks: {remarks}"
+    request.save()
+    
+    # Auto-sync with Inventory on Approval
+    if status == ResourceRequestStatus.APPROVED:
+        from .models import InventoryItem, InventoryCondition, InventoryAuditLog
+        
+        # Try to find existing item in this hostel
+        item, created = InventoryItem.objects.get_or_create(
+            hostel=request.hostel,
+            name=request.item_name,
+            defaults={
+                'category': request.category,
+                'unit': 'Pcs', # Default unit
+                'expected_quantity': request.quantity,
+                'current_quantity': request.quantity,
+                'condition': InventoryCondition.GOOD
+            }
+        )
+        
+        if not created:
+            item.expected_quantity += request.quantity
+            item.current_quantity += request.quantity
+            item.save()
+            
+        # Log the automated update
+        InventoryAuditLog.objects.create(
+            item=item,
+            hostel=request.hostel,
+            action="Procurement Linked",
+            old_qty=item.current_quantity - request.quantity if not created else 0,
+            new_qty=item.current_quantity,
+            old_condition=item.condition,
+            new_condition=item.condition,
+            performed_by=reviewer,
+            remarks=f"Automatically updated via approved Resource Request #{request.id}. Stock increased by {request.quantity}."
+        )
+
+    return request
+
+
+@transaction.atomic
+def bulk_upload_inventory(hostel_id, excel_file, user):
+    """
+    Bulk upload inventory items from Excel (HM-WF-108).
+    - Enforces strict categories (BR-HM-030.c)
+    - Updates expected_quantity for existing items (BR-HM-030.d)
+    - Creates audit logs for all changes
+    """
+    import pandas as pd
+    from .models import InventoryItem, InventoryCategory, Hostel, InventoryAuditLog
+
+    hostel = Hostel.objects.filter(hall_id=hostel_id).first()
+    if not hostel:
+        raise HostelManagementException(f"Hostel {hostel_id} not found.")
+
+    try:
+        df = pd.read_excel(excel_file)
+    except Exception as e:
+        raise HostelManagementException(f"Failed to read Excel file: {str(e)}")
+
+    required_cols = ['item_name', 'category', 'unit', 'expected_quantity']
+    actual_cols = df.columns.tolist()
+    for col in required_cols:
+        if col not in actual_cols:
+            raise HostelManagementException(f"Missing mandatory column: {col}")
+
+    created_count = 0
+    updated_count = 0
+    errors = []
+
+    valid_categories = [c[0] for c in InventoryCategory.choices]
+
+    for index, row in df.iterrows():
+        try:
+            name = str(row['item_name']).strip()
+            cat = str(row['category']).strip()
+            unit = str(row['unit']).strip()
+            exp_qty = int(row['expected_quantity'])
+            curr_qty = int(row['current_quantity']) if 'current_quantity' in row and not pd.isna(row['current_quantity']) else 0
+
+            if cat not in valid_categories:
+                errors.append(f"Row {index+2}: Invalid category '{cat}'")
+                continue
+
+            # Robust upsert logic
+            from .models import InventoryCondition
+            item = InventoryItem.objects.filter(hostel=hostel, name=name).first()
+            
+            if item:
+                item.category = cat
+                item.unit = unit
+                item.expected_quantity = exp_qty
+                if 'current_quantity' in row and not pd.isna(row['current_quantity']):
+                    item.current_quantity = curr_qty
+                item.save()
+                updated_count += 1
+                is_new = False
+            else:
+                item = InventoryItem.objects.create(
+                    hostel=hostel,
+                    name=name,
+                    category=cat,
+                    unit=unit,
+                    expected_quantity=exp_qty,
+                    current_quantity=curr_qty,
+                    condition=InventoryCondition.GOOD
+                )
+                created_count += 1
+                is_new = True
+
+            InventoryAuditLog.objects.create(
+                item=item,
+                hostel=hostel,
+                action="Bulk Uploaded",
+                new_qty=item.current_quantity,
+                new_condition=item.condition,
+                performed_by=user,
+                remarks="Imported via Excel upload"
+            )
+
+        except Exception as e:
+            errors.append(f"Row {index+2}: {str(e)}")
+
+    return {
+        'created': created_count,
+        'updated': updated_count,
+        'errors': errors
+    }
+
+
+@transaction.atomic
+def resolve_discrepancy(discrepancy_id, user):
+    """
+    Resolve a discrepancy by syncing inventory to reported actual quantity.
+    """
+    from .models import InventoryDiscrepancy, InventoryAuditLog, InventoryCondition
+    
+    discrepancy = InventoryDiscrepancy.objects.select_for_update().filter(id=discrepancy_id).first()
+    if not discrepancy:
+        raise HostelManagementException("Discrepancy not found.")
+        
+    item = discrepancy.item
+    old_qty = item.current_quantity
+    
+    # Sync inventory permanently: set baseline to verified count and reset condition to GOOD
+    item.expected_quantity = discrepancy.actual_qty
+    item.current_quantity = discrepancy.actual_qty
+    item.condition = InventoryCondition.GOOD 
+    item.last_inspected_at = timezone.now()
+    item.save()
+    
+    # Log resolution
+    InventoryAuditLog.objects.create(
+        item=item,
+        hostel=item.hostel,
+        action="Discrepancy Resolved",
+        old_qty=old_qty,
+        new_qty=item.current_quantity,
+        old_condition=item.condition,
+        new_condition=item.condition,
+        performed_by=user,
+        remarks=f"Resolved discrepancy: {discrepancy.remarks}. Stock reset to {item.expected_quantity} ({item.condition})."
+    )
+    
+    # Remove discrepancy record
+    discrepancy.delete()
+    
+    return item

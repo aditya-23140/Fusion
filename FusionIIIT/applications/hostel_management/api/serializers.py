@@ -50,7 +50,9 @@ from ..models import (
     HostelAuditLog,
     ComplaintHistory,
     FineCategoryChoices,
-    FineExtraDetail
+    FineExtraDetail,
+    InventoryItem, InventoryDiscrepancy, InventoryAuditLog as InventoryAuditTrail, ResourceRequest,
+    InventoryCategory, InventoryCondition, DiscrepancyType, ResourceRequestType, ResourceRequestStatus
 )
 from applications.academic_information.models import Student
 from applications.globals.models import Staff, Faculty
@@ -690,20 +692,123 @@ class StaffScheduleSerializer(serializers.ModelSerializer):
 
 
 # ══════════════════════════════════════════════════════════════
-# INVENTORY SERIALIZERS (HM-WF-108)
+# LEGACY INVENTORY SERIALIZERS (To be deprecated)
 # ══════════════════════════════════════════════════════════════
 
 class HostelInventorySerializer(serializers.ModelSerializer):
     """Serializer for Hostel Inventory."""
-    hall_name = serializers.CharField(source='hall.hall_name', read_only=True)
+    hall_name = serializers.CharField(source='hostel.name', read_only=True)
     
     class Meta:
         model = HostelInventory
         fields = [
-            'id', 'hall', 'hall_name', 'item_name', 'quantity', 'unit_cost',
+            'id', 'hostel', 'hall_name', 'item_name', 'quantity', 'unit_cost',
             'remarks', 'last_updated', 'created_at'
         ]
         read_only_fields = ['id', 'created_at', 'hall_name']
+
+
+# ══════════════════════════════════════════════════════════════
+# MODERN INVENTORY SERIALIZERS (HM-WF-108)
+# ══════════════════════════════════════════════════════════════
+
+class InventoryAuditTrailSerializer(serializers.ModelSerializer):
+    """Read-only serializer for inventory audit trail."""
+    performed_by_name = serializers.CharField(source='performed_by.get_full_name', read_only=True)
+    item_name = serializers.CharField(source='item.name', read_only=True)
+    hostel_name = serializers.CharField(source='hostel.name', read_only=True)
+
+    class Meta:
+        model = InventoryAuditTrail
+        fields = [
+            'id', 'item', 'item_name', 'hostel', 'hostel_name', 'action',
+            'old_qty', 'new_qty', 'old_condition', 'new_condition',
+            'performed_by', 'performed_by_name', 'remarks', 'timestamp'
+        ]
+        read_only_fields = fields
+
+
+class InventoryItemSerializer(serializers.ModelSerializer):
+    """Read-only serializer for inventory item details."""
+    hostel_name = serializers.CharField(source='hostel.name', read_only=True)
+
+    class Meta:
+        model = InventoryItem
+        fields = [
+            'id', 'hostel', 'hostel_name', 'name', 'category', 'unit',
+            'expected_quantity', 'current_quantity', 'condition',
+            'last_inspected_at', 'created_at', 'updated_at'
+        ]
+        read_only_fields = fields
+
+
+class InventoryInspectionSerializer(serializers.Serializer):
+    """Serializer for recording an inspection (HM-UC-020)."""
+    actual_qty = serializers.IntegerField(min_value=0)
+    condition = serializers.ChoiceField(choices=InventoryCondition.choices)
+    remarks = serializers.CharField(required=False, allow_blank=True, max_length=500)
+
+
+class InventoryItemUpdateSerializer(serializers.Serializer):
+    """Serializer for updating inventory records (HM-UC-021)."""
+    current_quantity = serializers.IntegerField(min_value=0)
+    condition = serializers.ChoiceField(choices=InventoryCondition.choices)
+    remarks = serializers.CharField(required=False, allow_blank=True, max_length=500)
+
+
+class InventoryDiscrepancySerializer(serializers.ModelSerializer):
+    """Read-only serializer for reported discrepancies."""
+    item_name = serializers.CharField(source='item.name', read_only=True)
+    hostel_name = serializers.CharField(source='hostel.name', read_only=True)
+    reported_by_name = serializers.CharField(source='reported_by.get_full_name', read_only=True)
+
+    class Meta:
+        model = InventoryDiscrepancy
+        fields = [
+            'id', 'item', 'item_name', 'hostel', 'hostel_name',
+            'discrepancy_type', 'expected_qty', 'actual_qty', 'condition',
+            'remarks', 'reported_by', 'reported_by_name', 'reported_at'
+        ]
+        read_only_fields = fields
+
+
+class ResourceRequestSerializer(serializers.ModelSerializer):
+    """Read-only serializer for resource procurement requests."""
+    requested_by_name = serializers.CharField(source='requested_by.get_full_name', read_only=True)
+    hostel_name = serializers.CharField(source='hostel.name', read_only=True)
+    reviewed_by_name = serializers.CharField(source='reviewed_by.get_full_name', read_only=True, allow_null=True)
+
+    class Meta:
+        model = ResourceRequest
+        fields = [
+            'id', 'hostel', 'hostel_name', 'requested_by', 'requested_by_name',
+            'request_type', 'category', 'item_name', 'quantity', 'justification',
+            'status', 'reviewed_by', 'reviewed_by_name', 'reviewed_at', 'created_at'
+        ]
+        read_only_fields = fields
+
+
+class ResourceRequestCreateSerializer(serializers.ModelSerializer):
+    """Create serializer for resource requests (HM-UC-022)."""
+    class Meta:
+        model = ResourceRequest
+        fields = ['hostel', 'request_type', 'category', 'item_name', 'quantity', 'justification']
+
+    def validate_quantity(self, value):
+        if value <= 0:
+            raise serializers.ValidationError("Quantity must be a positive integer (BR-HM-030.b).")
+        return value
+
+    def validate(self, data):
+        # BR-HM-030.a: BLOCK resource request if any mandatory fields are missing
+        # DRF handles presence check for non-nullable fields automatically if required=True
+        return data
+
+
+class ResourceRequestReviewSerializer(serializers.Serializer):
+    """Serializer for reviewing a resource request (HM-UC-023)."""
+    status = serializers.ChoiceField(choices=[ResourceRequestStatus.APPROVED, ResourceRequestStatus.REJECTED])
+    remarks = serializers.CharField(required=False, allow_blank=True, max_length=500)
 
 
 # ══════════════════════════════════════════════════════════════

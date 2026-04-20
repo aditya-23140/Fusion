@@ -52,10 +52,13 @@ from .serializers import (
     HostelFineSerializer, HostelFinePaymentSerializer, HostelFineWaiverSerializer,
     StaffScheduleSerializer, HostelInventorySerializer,
     GuestRoomBookingSerializer, GuestRoomBookingCreateSerializer, GuestRoomBookingApprovalSerializer,
-    HostelNoticeBoardSerializer, StudentAttendanceRecordSerializer
+    HostelNoticeBoardSerializer, StudentAttendanceRecordSerializer,
+    InventoryItemSerializer, InventoryInspectionSerializer, InventoryItemUpdateSerializer,
+    InventoryDiscrepancySerializer, InventoryAuditTrailSerializer,
+    ResourceRequestSerializer, ResourceRequestCreateSerializer, ResourceRequestReviewSerializer
 )
 from .. import selectors, services
-from ..permissions import IsHostelSuperAdmin, IsAssignedToHostel
+from ..permissions import IsHostelSuperAdmin, IsAssignedToHostel, IsWardenOrAdmin
 from ..services import (
     HostelManagementException, LeaveEligibilityError, LeaveDateError,
     ComplaintEligibilityError, ComplaintRoutingError, ResolutionRemarksError,
@@ -97,6 +100,17 @@ class IsCaretaker(BasePermission):
     """Permission for Caretaker role only."""
     def has_permission(self, request, view):
         return selectors.is_user_caretaker(request.user)
+
+
+class IsWardenCaretakerOrAdmin(BasePermission):
+    """Combined permission to avoid Bitwise OR issues (DRF < 3.9)."""
+    def has_permission(self, request, view):
+        if not (request.user and request.user.is_authenticated):
+            return False
+        return (
+            request.user.is_superuser or 
+            selectors.is_user_warden_or_caretaker(request.user)
+        )
 
 
 class IsStudent(BasePermission):
@@ -1019,14 +1033,170 @@ class InventoryListCreateView(generics.ListCreateAPIView):
         return selectors.get_all_inventory()
 
     def perform_create(self, serializer):
-        """Add inventory item via service."""
+        """Add legacy inventory item via service."""
         services.add_inventory_item(
-            hall_id=serializer.validated_data['hall'].id,
+            hall_id=serializer.validated_data['hostel'].id,
             item_name=serializer.validated_data['item_name'],
             quantity=serializer.validated_data['quantity'],
             unit_cost=serializer.validated_data['unit_cost'],
             remarks=serializer.validated_data.get('remarks')
         )
+
+
+# ══════════════════════════════════════════════════════════════
+# MODERN INVENTORY VIEWS (HM-WF-108)
+# ══════════════════════════════════════════════════════════════
+from rest_framework import viewsets
+from rest_framework.decorators import action
+
+class InventoryItemViewSet(viewsets.ModelViewSet):
+    """
+    ViewSet for Inventory Items.
+    - HM-UC-020: Record Inspection
+    - HM-UC-021: Update Record
+    """
+    permission_classes = [IsAuthenticated, IsWardenCaretakerOrAdmin]
+    serializer_class = InventoryItemSerializer
+
+    def get_queryset(self):
+        return selectors.list_inventory_items(self.request.user)
+
+    @action(detail=True, methods=['post'], permission_classes=[IsAuthenticated, IsCaretaker])
+    def inspect(self, request, pk=None):
+        """Record an inspection for a specific item."""
+        serializer = InventoryInspectionSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        
+        try:
+            item = services.record_inventory_inspection(
+                item_id=pk,
+                actual_qty=serializer.validated_data['actual_qty'],
+                condition=serializer.validated_data['condition'],
+                performer=request.user,
+                remarks=serializer.validated_data.get('remarks', "")
+            )
+            return Response(InventoryItemSerializer(item).data)
+        except Exception as e:
+            return Response({'detail': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+    @action(detail=True, methods=['post'], permission_classes=[IsAuthenticated, IsWardenCaretakerOrAdmin])
+    def update_record(self, request, pk=None):
+        """Update inventory quantity/condition directly."""
+        serializer = InventoryItemUpdateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        
+        try:
+            item = services.update_inventory_record(
+                item_id=pk,
+                quantity=serializer.validated_data['current_quantity'],
+                condition=serializer.validated_data['condition'],
+                performer=request.user,
+                remarks=serializer.validated_data['remarks']
+            )
+            return Response(InventoryItemSerializer(item).data)
+        except Exception as e:
+            return Response({'detail': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+    @action(detail=False, methods=['post'], url_path='bulk-upload', permission_classes=[IsAuthenticated, IsWardenCaretakerOrAdmin])
+    def bulk_upload(self, request):
+        """Bulk upload inventory from Excel."""
+        hostel_id = request.data.get('hostel_id')
+        excel_file = request.FILES.get('file')
+
+        if not hostel_id or not excel_file:
+            return Response({'detail': 'hostel_id and file are required.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            results = services.bulk_upload_inventory(
+                hostel_id=hostel_id,
+                excel_file=excel_file,
+                user=request.user
+            )
+            return Response(results)
+        except Exception as e:
+            return Response({'detail': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+
+class InventoryDiscrepancyViewSet(viewsets.ReadOnlyModelViewSet):
+    """ViewSet for viewing inventory discrepancies."""
+    permission_classes = [IsAuthenticated, IsWardenCaretakerOrAdmin]
+    serializer_class = InventoryDiscrepancySerializer
+
+    def get_queryset(self):
+        return selectors.list_discrepancies(self.request.user)
+
+    @action(detail=True, methods=['post'], permission_classes=[IsAuthenticated, IsWardenOrAdmin])
+    def resolve(self, request, pk=None):
+        """Resolve discrepancy by syncing inventory."""
+        try:
+            item = services.resolve_discrepancy(discrepancy_id=pk, user=request.user)
+            return Response(InventoryItemSerializer(item).data)
+        except Exception as e:
+            return Response({'detail': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+
+class InventoryAuditTrailViewSet(viewsets.ReadOnlyModelViewSet):
+    """ViewSet for viewing immutable inventory audit trails."""
+    permission_classes = [IsAuthenticated, IsWardenCaretakerOrAdmin]
+    serializer_class = InventoryAuditTrailSerializer
+
+    def get_queryset(self):
+        item_id = self.request.query_params.get('item_id')
+        return selectors.list_inventory_audit_logs(self.request.user, item_id=item_id)
+
+
+class ResourceRequestViewSet(viewsets.ModelViewSet):
+    """
+    ViewSet for resource procurement requests.
+    - HM-UC-022: Submit Request
+    - HM-UC-023: Review Request (Admin only)
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get_serializer_class(self):
+        if self.action == 'create':
+            return ResourceRequestCreateSerializer
+        return ResourceRequestSerializer
+
+    def get_queryset(self):
+        return selectors.list_resource_requests(self.request.user)
+
+    def get_permissions(self):
+        if self.action == 'create':
+            return [IsAuthenticated(), IsCaretaker()]
+        return [IsAuthenticated(), IsWardenCaretakerOrAdmin()]
+
+    def perform_create(self, serializer):
+        try:
+            services.submit_resource_request(
+                hostel_id=serializer.validated_data['hostel'].hall_id,
+                requester=self.request.user,
+                request_type=serializer.validated_data['request_type'],
+                category=serializer.validated_data['category'],
+                item_name=serializer.validated_data['item_name'],
+                quantity=serializer.validated_data['quantity'],
+                justification=serializer.validated_data['justification']
+            )
+        except Exception as e:
+            from rest_framework.exceptions import ValidationError
+            raise ValidationError({'detail': str(e)})
+
+    @action(detail=True, methods=['post'], permission_classes=[IsWardenOrAdmin])
+    def review(self, request, pk=None):
+        """Approve or reject a resource request (Admin only)."""
+        serializer = ResourceRequestReviewSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        
+        try:
+            res_request = services.review_resource_request(
+                request_id=pk,
+                reviewer=request.user,
+                status=serializer.validated_data['status'],
+                remarks=serializer.validated_data.get('remarks', "")
+            )
+            return Response(ResourceRequestSerializer(res_request).data)
+        except Exception as e:
+            return Response({'detail': str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
 
 class InventoryRetrieveUpdateView(generics.RetrieveUpdateAPIView):

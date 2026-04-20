@@ -67,6 +67,40 @@ class FineCategoryChoices(models.TextChoices):
     ROOM_STANDARDS = "RoomStandardsViolation", "Room Standards Violation"
 
 
+class InventoryCategory(models.TextChoices):
+    MAINTENANCE = "Maintenance", "Maintenance"
+    CLEANING = "Cleaning", "Cleaning"
+    BEDDING = "Bedding", "Bedding"
+    EQUIPMENT = "Equipment", "Equipment"
+    FURNITURE = "Furniture", "Furniture"
+    ELECTRONICS = "Electronics", "Electronics"
+    OTHER = "Other", "Other"
+
+
+class InventoryCondition(models.TextChoices):
+    GOOD = "Good", "Good"
+    DAMAGED = "Damaged", "Damaged"
+    MISSING = "Missing", "Missing"
+
+
+class DiscrepancyType(models.TextChoices):
+    MISSING = "Missing", "Missing"
+    DAMAGED = "Damaged", "Damaged"
+    DEPLETED = "Depleted", "Depleted"
+
+
+class ResourceRequestType(models.TextChoices):
+    NEW = "New", "New"
+    REPLACEMENT = "Replacement", "Replacement"
+    ADDITIONAL = "Additional", "Additional"
+
+
+class ResourceRequestStatus(models.TextChoices):
+    PENDING = "Pending", "Pending"
+    APPROVED = "Approved", "Approved"
+    REJECTED = "Rejected", "Rejected"
+
+
 class RoomChangeStatusChoices(models.TextChoices):
     """Room change request status."""
     PENDING = "pending", "Pending"
@@ -632,6 +666,98 @@ class HostelInventory(models.Model):
 
     def __str__(self):
         return f"{self.hostel.name} - {self.item_name}"
+
+
+class InventoryItem(models.Model):
+    """
+    Modern inventory item record.
+    """
+    hostel = models.ForeignKey(Hostel, on_delete=models.CASCADE, related_name='inventory_items', to_field='hall_id')
+    name = models.CharField(max_length=100)
+    category = models.CharField(max_length=50, choices=InventoryCategory.choices, default=InventoryCategory.OTHER)
+    unit = models.CharField(max_length=20, default="pcs")
+    expected_quantity = models.PositiveIntegerField(default=0)
+    current_quantity = models.PositiveIntegerField(default=0)
+    condition = models.CharField(max_length=20, choices=InventoryCondition.choices, default=InventoryCondition.GOOD)
+    last_inspected_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'hostel_management_inventoryitem'
+        ordering = ['hostel', 'category', 'name']
+        unique_together = ['hostel', 'name']
+
+    def __str__(self):
+        return f"{self.name} at {self.hostel.name}"
+
+
+class InventoryDiscrepancy(models.Model):
+    """
+    Records identified discrepancies during inspections.
+    """
+    item = models.ForeignKey(InventoryItem, on_delete=models.CASCADE, related_name='discrepancies')
+    hostel = models.ForeignKey(Hostel, on_delete=models.CASCADE, to_field='hall_id')
+    discrepancy_type = models.CharField(max_length=20, choices=DiscrepancyType.choices)
+    expected_qty = models.PositiveIntegerField()
+    actual_qty = models.PositiveIntegerField()
+    condition = models.CharField(max_length=20, choices=InventoryCondition.choices, default=InventoryCondition.GOOD)
+    remarks = models.TextField()
+    reported_by = models.ForeignKey(User, on_delete=models.CASCADE, related_name='reported_discrepancies')
+    reported_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'hostel_management_inventorydiscrepancy'
+        ordering = ['-reported_at']
+
+
+class InventoryAuditLog(models.Model):
+    """
+    Immutable audit trail for every inventory write.
+    """
+    item = models.ForeignKey(InventoryItem, on_delete=models.CASCADE, related_name='audit_logs')
+    hostel = models.ForeignKey(Hostel, on_delete=models.CASCADE, to_field='hall_id')
+    action = models.CharField(max_length=50) # e.g., "Updated", "Inspected"
+    old_qty = models.PositiveIntegerField(null=True, blank=True)
+    new_qty = models.PositiveIntegerField()
+    old_condition = models.CharField(max_length=20, null=True, blank=True)
+    new_condition = models.CharField(max_length=20)
+    performed_by = models.ForeignKey(User, on_delete=models.CASCADE)
+    remarks = models.TextField(blank=True)
+    timestamp = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'hostel_management_inventoryauditlog'
+        ordering = ['-timestamp']
+
+    def delete(self, *args, **kwargs):
+        raise PermissionError("InventoryAuditLog entries are immutable and cannot be deleted.")
+
+    def save(self, *args, **kwargs):
+        if self.pk:
+            raise PermissionError("InventoryAuditLog entries are immutable and cannot be updated.")
+        super().save(*args, **kwargs)
+
+
+class ResourceRequest(models.Model):
+    """
+    Resource procurement requests submitted by caretakers.
+    """
+    hostel = models.ForeignKey(Hostel, on_delete=models.CASCADE, related_name='resource_requests', to_field='hall_id')
+    requested_by = models.ForeignKey(User, on_delete=models.CASCADE, related_name='submitted_resource_requests')
+    request_type = models.CharField(max_length=20, choices=ResourceRequestType.choices)
+    category = models.CharField(max_length=20, choices=InventoryCategory.choices, default=InventoryCategory.OTHER)
+    item_name = models.CharField(max_length=100)
+    quantity = models.PositiveIntegerField()
+    justification = models.TextField()
+    status = models.CharField(max_length=20, choices=ResourceRequestStatus.choices, default=ResourceRequestStatus.PENDING)
+    reviewed_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='reviewed_resource_requests')
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'hostel_management_resourcerequest'
+        ordering = ['-created_at']
     
 
 # ══════════════════════════════════════════════════════════════

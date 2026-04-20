@@ -12,6 +12,17 @@ from . import views
 
 app_name = 'hostel_management_api'
 
+from rest_framework.routers import DefaultRouter
+
+# ══════════════════════════════════════════════════════════════
+# ROUTER CONFIGURATION
+# ══════════════════════════════════════════════════════════════
+inventory_router = DefaultRouter()
+inventory_router.register('items', views.InventoryItemViewSet, basename='inventory-item')
+inventory_router.register('discrepancies', views.InventoryDiscrepancyViewSet, basename='inventory-discrepancy')
+inventory_router.register('audit-trail', views.InventoryAuditTrailViewSet, basename='inventory-audit-trail')
+inventory_router.register('resource-requests', views.ResourceRequestViewSet, basename='resource-request')
+
 # ══════════════════════════════════════════════════════════════
 # HOSTEL SETUP FOUNDATION ROUTES (Modernized)
 # ══════════════════════════════════════════════════════════════
@@ -107,8 +118,7 @@ schedule_patterns = [
 # INVENTORY MANAGEMENT ROUTES (HM-WF-108)
 # ══════════════════════════════════════════════════════════════
 inventory_patterns = [
-    path('', views.InventoryListCreateView.as_view(), name='inventory-list-create'),
-    path('<int:pk>/', views.InventoryRetrieveUpdateView.as_view(), name='inventory-detail'),
+    path('', include(inventory_router.urls)),
 ]
 
 # ══════════════════════════════════════════════════════════════

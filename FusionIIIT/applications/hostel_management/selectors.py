@@ -28,7 +28,9 @@ from .models import (
     FineStatusChoices, BookingStatusChoices,
     AccommodationApplicationWindow, AccommodationRequest, RoomAllotment,
     HostelTypeChoices, RoomTypeChoices,
-    Hostel, Room, HostelStaffAssignment
+    Hostel, Room, HostelStaffAssignment,
+    InventoryItem, InventoryDiscrepancy, InventoryAuditLog, ResourceRequest,
+    ResourceRequestStatus
 )
 from applications.academic_information.models import Student
 from applications.globals.models import Staff, Faculty
@@ -1313,3 +1315,74 @@ def get_extended_stay(pk):
     """Retrieve a specific extended stay application by its primary key."""
     from .models import ExtendedStayApplication
     return ExtendedStayApplication.objects.filter(pk=pk).first()
+
+
+# ══════════════════════════════════════════════════════════════
+# MODERN INVENTORY SELECTORS
+# ══════════════════════════════════════════════════════════════
+
+def list_inventory_items(user):
+    """
+    List inventory items scoped to user role.
+    - super_admin: all items
+    - warden/caretaker: items in assigned hostels
+    """
+    queryset = InventoryItem.objects.select_related('hostel').all()
+    
+    if user.is_superuser:
+        return queryset
+        
+    assigned_hostel_ids = list_assigned_hostels(user).values_list('hall_id', flat=True)
+    return queryset.filter(hostel_id__in=assigned_hostel_ids)
+
+
+def get_inventory_item(id, user=None):
+    """Fetch an inventory item, optionally checking user scope."""
+    item = InventoryItem.objects.filter(id=id).select_related('hostel').first()
+    if not item or user is None or user.is_superuser:
+        return item
+        
+    assigned_hostel_ids = list_assigned_hostels(user).values_list('hall_id', flat=True)
+    if item.hostel_id not in assigned_hostel_ids:
+        return None
+    return item
+
+
+def list_discrepancies(user):
+    """List discrepancies scoped to user role."""
+    queryset = InventoryDiscrepancy.objects.select_related('item', 'hostel', 'reported_by').all()
+    
+    if user.is_superuser:
+        return queryset
+        
+    assigned_hostel_ids = list_assigned_hostels(user).values_list('hall_id', flat=True)
+    return queryset.filter(hostel_id__in=assigned_hostel_ids)
+
+
+def list_resource_requests(user):
+    """
+    List resource requests scoped to user role.
+    - super_admin: all requests
+    - warden/caretaker: requests from assigned hostels
+    """
+    queryset = ResourceRequest.objects.select_related('hostel', 'requested_by', 'reviewed_by').all()
+    
+    if user.is_superuser:
+        return queryset
+        
+    assigned_hostel_ids = list_assigned_hostels(user).values_list('hall_id', flat=True)
+    return queryset.filter(hostel_id__in=assigned_hostel_ids)
+
+
+def list_inventory_audit_logs(user, item_id=None):
+    """List audit logs scoped to user role."""
+    queryset = InventoryAuditLog.objects.select_related('item', 'hostel', 'performed_by').all()
+    
+    if item_id:
+        queryset = queryset.filter(item_id=item_id)
+        
+    if user.is_superuser:
+        return queryset
+        
+    assigned_hostel_ids = list_assigned_hostels(user).values_list('hall_id', flat=True)
+    return queryset.filter(hostel_id__in=assigned_hostel_ids)
