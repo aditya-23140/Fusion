@@ -545,6 +545,10 @@ def escalate_complaint(complaint_id, staff_user, reason):
     if not complaint:
         raise HostelManagementException("Complaint not found.")
     
+    # BR-HM-111: Wardens cannot escalate further
+    if selectors.is_user_warden(staff_user):
+        raise WardenAuthorityError("Wardens cannot escalate complaints further. They are the final authority for resolution.")
+    
     # BR-HM-109: Block if status is not InProgress
     if complaint.status != ComplaintStatusChoices.IN_PROGRESS:
         raise EscalationAuthorizationError("Only complaints 'In Progress' can be escalated.")
@@ -589,10 +593,18 @@ def resolve_complaint(complaint_id, resolver_user, resolution_remarks):
     if not resolution_remarks or len(resolution_remarks.strip()) < 10:
         raise ResolutionRemarksError("Resolution remarks are mandatory (min 10 chars).")
 
-    # BR-HM-110: Warden authority check
-    if complaint.status == ComplaintStatusChoices.ESCALATED:
-        if not selectors.is_user_warden(resolver_user):
-            raise WardenAuthorityError("Only a Warden can resolve escalated complaints.")
+    # BR-HM-110: Role-based authority separation
+    is_warden = selectors.is_user_warden(resolver_user)
+    is_caretaker = selectors.is_user_caretaker(resolver_user)
+
+    if is_warden:
+        if complaint.status != ComplaintStatusChoices.ESCALATED:
+            raise WardenAuthorityError("Wardens can only resolve complaints that have been escalated to them.")
+    elif is_caretaker:
+        if complaint.status != ComplaintStatusChoices.IN_PROGRESS:
+            raise HostelManagementException("Caretakers can only resolve complaints that are currently 'In Progress'.")
+    else:
+        raise HostelManagementException("Only authorized staff or wardens can resolve complaints.")
 
     old_status = complaint.status
     with transaction.atomic():
