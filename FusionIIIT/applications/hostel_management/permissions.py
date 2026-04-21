@@ -83,3 +83,29 @@ class IsWardenOrAdmin(BasePermission):
         # Check if the request's hostel is in user's assigned list
         hostel_id = getattr(obj, 'hostel_id', None) or getattr(obj.hostel, 'hall_id', None)
         return assigned_hostels.filter(hall_id=hostel_id).exists()
+
+
+class HasActiveHostelAllotment(BasePermission):
+    """
+    Permission for Students who have an active room allotment.
+    Blocks unallotted students from accessing residency-only features.
+    """
+    message = "You must be allocated to a hostel to access this feature."
+
+    def has_permission(self, request, view):
+        if not (request.user and request.user.is_authenticated):
+            return False
+        
+        # Staff and Super Admins always pass
+        if request.user.is_staff or request.user.is_superuser:
+            return True
+
+        # Check if student has active allotment
+        from applications.academic_information.models import Student
+        from .models import RoomAllotment
+        
+        student = Student.objects.filter(id__user=request.user).first()
+        if not student:
+             return False
+             
+        return RoomAllotment.objects.filter(student=student, is_active=True).exists()

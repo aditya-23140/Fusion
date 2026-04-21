@@ -83,10 +83,10 @@ from .serializers import (
     StudentAttendanceRecordSerializer,
     InventoryItemSerializer, InventoryInspectionSerializer, InventoryItemUpdateSerializer,
     InventoryDiscrepancySerializer, InventoryAuditTrailSerializer,
-    ResourceRequestSerializer, ResourceRequestCreateSerializer, ResourceRequestReviewSerializer
+    ResourceRequestSerializer, ResourceRequestCreateSerializer, ResourceRequestReviewSerializer, BulkHostelVacationSerializer
 )
 from .. import selectors, services
-from ..permissions import IsHostelSuperAdmin, IsAssignedToHostel, IsWardenOrAdmin
+from ..permissions import IsHostelSuperAdmin, IsAssignedToHostel, IsWardenOrAdmin, HasActiveHostelAllotment
 from ..services import (
     HostelManagementException, LeaveEligibilityError, LeaveDateError,
     ComplaintEligibilityError, ComplaintRoutingError, ResolutionRemarksError,
@@ -137,7 +137,8 @@ class IsWardenCaretakerOrAdmin(BasePermission):
             return False
         return (
             request.user.is_superuser or 
-            selectors.is_user_warden_or_caretaker(request.user)
+            selectors.is_user_warden_or_caretaker(request.user) or
+            HasActiveHostelAllotment().has_permission(request, view)
         )
 
 
@@ -278,7 +279,7 @@ class RoomRenameView(generics.UpdateAPIView):
 
 class LeaveListCreateView(generics.ListCreateAPIView):
     """List leaves or submit a new leave request (BR-HM-101 to 103)."""
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, HasActiveHostelAllotment]
     parser_classes = (parsers.MultiPartParser, parsers.FormParser, parsers.JSONParser)
     
     def get_queryset(self):
@@ -401,7 +402,7 @@ class LeaveRejectView(generics.UpdateAPIView):
 
 class ComplaintListCreateView(generics.ListCreateAPIView):
     """List complaints (scoped) or submit new."""
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, HasActiveHostelAllotment]
     parser_classes = [parsers.MultiPartParser, parsers.FormParser, parsers.JSONParser]
 
     def get_serializer_class(self):
@@ -569,7 +570,7 @@ class RoomCapacityDashboardView(generics.ListAPIView):
 
 class MyAllotmentView(generics.RetrieveAPIView):
     """View the active allotment for the current authenticated student."""
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, HasActiveHostelAllotment]
     serializer_class = serializers.RoomAllotmentSerializer
 
     def get_object(self):
@@ -706,7 +707,7 @@ class RoomAllotmentDestroyView(generics.DestroyAPIView):
 
 class RoomChangeListCreateView(generics.ListCreateAPIView):
     """List room changes or request a room change."""
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, HasActiveHostelAllotment]
     serializer_class = RoomAllocationChangeSerializer
 
     def get_queryset(self):
@@ -834,7 +835,7 @@ class FineListCreateView(generics.ListCreateAPIView):
     - Warden: view assigned hostel
     - Admin: view all
     """
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, HasActiveHostelAllotment]
     
     def get_serializer_class(self):
         if self.request.method == 'POST':
@@ -1326,7 +1327,7 @@ class GuestRoomRegistryViewSet(viewsets.ModelViewSet):
 
 class GuestBookingListCreateView(generics.ListCreateAPIView):
     """Student requests or standard listing of bookings."""
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, HasActiveHostelAllotment]
 
     def get_serializer_class(self):
         if self.request.method == 'POST':
@@ -1459,7 +1460,7 @@ class NoticeListCreateView(generics.ListCreateAPIView):
     - Students: See scoped active notices.
     - Staff: See all notices for their assigned hostels.
     """
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, HasActiveHostelAllotment]
     serializer_class = NoticeSerializer
     pagination_class = StandardPagination
 
@@ -1548,7 +1549,7 @@ from ..selectors import list_room_vacations, get_room_vacation, list_extended_st
 
 class RoomVacationListCreateView(generics.ListCreateAPIView):
     serializer_class = RoomVacationRequestSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, HasActiveHostelAllotment]
 
     def get_queryset(self):
         filters = {}
@@ -1598,7 +1599,7 @@ class RoomVacationApproveView(generics.UpdateAPIView):
 
 class ExtendedStayListCreateView(generics.ListCreateAPIView):
     serializer_class = ExtendedStayApplicationSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, HasActiveHostelAllotment]
 
     def get_queryset(self):
         filters = {}
@@ -1855,46 +1856,19 @@ class AssignWardenView(generics.GenericAPIView):
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
         user = User.objects.get(id=serializer.validated_data['user_id'])
-        warning = serializer.validated_data.get('_warning')
 
-        # Block if a warden is already assigned
-        active_warden = HostelStaffAssignment.objects.filter(
-            hostel=hostel, role=StaffRoleChoices.WARDEN, is_active=True
-        ).exists()
-
-        if active_warden:
-            return Response(
-                {"error": "This hostel already has an active Warden assigned. Please remove the existing assignment first."},
-                status=status.HTTP_400_BAD_REQUEST
+        try:
+            assignment = services.assign_staff_to_hostel(
+                hostel=hostel,
+                staff_user=user,
+                role=StaffRoleChoices.WARDEN,
+                start_date=serializer.validated_data['start_date'],
+                end_date=serializer.validated_data.get('end_date'),
+                assigned_by=request.user
             )
-
-        assignment = HostelStaffAssignment.objects.create(
-            hostel=hostel,
-            user=user,
-            role=StaffRoleChoices.WARDEN,
-            start_date=serializer.validated_data['start_date'],
-            end_date=serializer.validated_data.get('end_date'),
-            is_active=True,
-            assigned_by=request.user
-        )
-
-        # Write audit log
-        HostelAuditLog.objects.create(
-            hostel=hostel,
-            action='WARDEN_ASSIGNED',
-            performed_by=request.user,
-            detail_json={
-                'user_id': user.id,
-                'user_name': user.get_full_name() or user.username,
-                'start_date': str(assignment.start_date),
-            }
-        )
-
-        result = StaffAssignmentSerializer(assignment).data
-        if warning:
-            result['warning'] = warning
-
-        return Response(result, status=status.HTTP_201_CREATED)
+            return Response(StaffAssignmentSerializer(assignment).data, status=status.HTTP_201_CREATED)
+        except HostelManagementException as e:
+            return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
 
 class AssignCaretakerView(generics.GenericAPIView):
@@ -1917,45 +1891,19 @@ class AssignCaretakerView(generics.GenericAPIView):
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
         user = User.objects.get(id=serializer.validated_data['user_id'])
-        warning = serializer.validated_data.get('_warning')
 
-        # Block if a caretaker is already assigned
-        active_caretaker = HostelStaffAssignment.objects.filter(
-            hostel=hostel, role=StaffRoleChoices.CARETAKER, is_active=True
-        ).exists()
-
-        if active_caretaker:
-            return Response(
-                {"error": "This hostel already has an active Caretaker assigned. Please remove the existing assignment first."},
-                status=status.HTTP_400_BAD_REQUEST
+        try:
+            assignment = services.assign_staff_to_hostel(
+                hostel=hostel,
+                staff_user=user,
+                role=StaffRoleChoices.CARETAKER,
+                start_date=serializer.validated_data['start_date'],
+                end_date=serializer.validated_data.get('end_date'),
+                assigned_by=request.user
             )
-
-        assignment = HostelStaffAssignment.objects.create(
-            hostel=hostel,
-            user=user,
-            role=StaffRoleChoices.CARETAKER,
-            start_date=serializer.validated_data['start_date'],
-            end_date=serializer.validated_data.get('end_date'),
-            is_active=True,
-            assigned_by=request.user
-        )
-
-        HostelAuditLog.objects.create(
-            hostel=hostel,
-            action='CARETAKER_ASSIGNED',
-            performed_by=request.user,
-            detail_json={
-                'user_id': user.id,
-                'user_name': user.get_full_name() or user.username,
-                'start_date': str(assignment.start_date),
-            }
-        )
-
-        result = StaffAssignmentSerializer(assignment).data
-        if warning:
-            result['warning'] = warning
-
-        return Response(result, status=status.HTTP_201_CREATED)
+            return Response(StaffAssignmentSerializer(assignment).data, status=status.HTTP_201_CREATED)
+        except HostelManagementException as e:
+            return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
 
 class ReassignStaffView(generics.GenericAPIView):
@@ -2092,3 +2040,31 @@ class DeleteHostelView(generics.DestroyAPIView):
         # the audit log entries for that hostel will ALSO be deleted if they have a FK to it.
         # This is a drawback of CASCADE audit logs.
         super().perform_destroy(instance)
+
+# ══════════════════════════════════════════════════════════════
+# SEMESTER END VACATION VIEWS
+# ══════════════════════════════════════════════════════════════
+
+class BulkHostelVacationView(generics.GenericAPIView):
+    """
+    Process bulk vacation for multiple hostels (SuperAdmin only).
+    Permanently unallocates students and resets rooms.
+    """
+    permission_classes = [IsHostelSuperAdmin]
+    serializer_class = BulkHostelVacationSerializer
+
+    def post(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        try:
+            count = services.process_bulk_hostel_vacation(
+                hostel_ids=serializer.validated_data['hostel_ids'],
+                performed_by=request.user
+            )
+            return Response({
+                "message": f"Successfully vacated {count} hostels.",
+                "hostels_affected": count
+            }, status=status.HTTP_200_OK)
+        except Exception as e:
+            return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)

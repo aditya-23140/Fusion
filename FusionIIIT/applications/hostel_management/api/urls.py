@@ -32,6 +32,7 @@ guest_registry_router.register('registry', views.GuestRoomRegistryViewSet, basen
 hostel_setup_patterns = [
     path('', views.ListHostelsView.as_view(), name='hostel-list'),
     path('create/', views.CreateHostelView.as_view(), name='hostel-create'),
+    path('bulk-vacate/', views.BulkHostelVacationView.as_view(), name='hostel-bulk-vacate'),
     path('<str:pk>/', views.RetrieveHostelView.as_view(), name='hostel-detail'),
     path('<str:pk>/rooms/', views.ListRoomsByHostelView.as_view(), name='hostel-rooms'),
     path('<str:pk>/status/', views.ManageHostelStatusView.as_view(), name='hostel-status'),

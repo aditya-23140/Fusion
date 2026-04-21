@@ -323,17 +323,16 @@ class StaffAssignmentCreateSerializer(serializers.Serializer):
         from django.contrib.auth.models import User
         user = User.objects.get(id=data['user_id'])
 
-        # BR-HM-019.b: Check concurrent active assignments (warn, don't block)
-        concurrent_count = HostelStaffAssignment.objects.filter(
+        # Check for multiple concurrent assignments (BR-HM-034 - Hard Block)
+        active_assignment = HostelStaffAssignment.objects.filter(
             user=user, is_active=True
-        ).count()
+        ).select_related('hostel').first()
 
-        if concurrent_count >= 2:
-            data['_warning'] = (
-                f"{user.get_full_name() or user.username} already has "
-                f"{concurrent_count} active hostel assignment(s). "
-                "This assignment will proceed, but please review."
-            )
+        if active_assignment:
+            raise serializers.ValidationError({
+                "user_id": f"This user is already actively assigned to {active_assignment.hostel.name}. "
+                           "Please remove their current assignment before re-assigning."
+            })
 
         if data.get('end_date') and data['end_date'] < data['start_date']:
             raise serializers.ValidationError("End date must be after start date.")
@@ -1147,3 +1146,22 @@ class BatchAllocationSerializer(serializers.Serializer):
     programme_category = serializers.ChoiceField(choices=PROGRAMME_CATEGORIES)
     admission_year = serializers.IntegerField()
     gender = serializers.ChoiceField(choices=GENDER_CHOICES)
+
+# ══════════════════════════════════════════════════════════════
+# SEMESTER END VACATION SERIALIZERS
+# ══════════════════════════════════════════════════════════════
+
+class BulkHostelVacationSerializer(serializers.Serializer):
+    """Serializer for bulk hostel vacation (empty out)."""
+    hostel_ids = serializers.ListField(
+        child=serializers.CharField(),
+        min_length=1,
+        help_text="List of hostel hall_ids to empty out."
+    )
+
+    def validate_hostel_ids(self, value):
+        valid_hostels = Hostel.objects.filter(hall_id__in=value).values_list('hall_id', flat=True)
+        invalid_hostels = set(value) - set(valid_hostels)
+        if invalid_hostels:
+            raise serializers.ValidationError(f"Invalid hostel IDs: {', '.join(invalid_hostels)}")
+        return value

@@ -16,7 +16,7 @@ from .models import (
     HostelComplaint, RoomAllocationChange,
     HostelFine, StaffSchedule, HostelInventory, HostelNoticeBoard,
     GuestRoomBooking, GuestRoom, Hostel, Room, RoomAllotment,
-    HostelStaffAssignment,
+    HostelStaffAssignment, HostelAuditLog,
     AccommodationApplicationWindow, AccommodationRequest,
     StaffRoleChoices, RoomSetupStatusChoices,
     ComplaintHistory, ComplaintCategoryChoices, ComplaintStatusChoices,
@@ -590,6 +590,9 @@ def perform_bulk_allotment(request_ids, allotted_by):
                 # Update Room occupancy
                 room.current_occupancy += 1
                 room.save()
+
+                # BR-HM-036: Transfer unpaid fines to the new hostel
+                transfer_student_fines(req.student, room.hostel)
 
                 # Update Request status
                 req.status = AccommodationRequest.Status.ALLOTTED
@@ -1592,6 +1595,13 @@ def perform_bulk_batch_allocation(hall_id, programme_category, admission_year, g
         # 2. Identify target Hostel and verify gender
         hostel = get_object_or_404(Hostel, hall_id=hall_id)
         
+        # Guard: Check for existing active residents
+        if RoomAllotment.objects.filter(hostel=hostel, is_active=True).exists():
+             raise ValueError(
+                 f"Bulk allocation cannot be performed on {hostel.name} because it already has active residents. "
+                 "Please ensure the hostel is 'Emptied Out' before a fresh batch allocation."
+             )
+
         # Gender mismatch check (prevent cross-gender bulk allocation)
         if gender == 'M' and hostel.type == 'Girl':
              raise ValueError(f"Hostel {hall_id} is for Girls, but Male students selected.")
@@ -2472,3 +2482,169 @@ def process_checkout_service(booking_id, caretaker_user, condition_remarks, dama
         )
     
     return booking, inspection
+
+
+@transaction.atomic
+def assign_staff_to_hostel(hostel, staff_user, role, start_date, assigned_by, end_date=None):
+    """
+    Assign a staff member (Warden/Caretaker) to a hostel.
+    Enforces business rules:
+    - BR-HM-034: A staff member can only have ONE active hostel assignment across the system.
+    - BR-HM-035: A hostel can only have ONE active Warden/Caretaker (depending on role).
+    """
+    # 1. Rule: One active assignment per staff member globally
+    active_assignment = HostelStaffAssignment.objects.filter(
+        user=staff_user, is_active=True
+    ).select_related('hostel').first()
+
+    if active_assignment:
+        raise HostelManagementException(
+            f"Staff member {staff_user.get_full_name() or staff_user.username} is already "
+            f"actively assigned to {active_assignment.hostel.name}. "
+            "Please remove their current assignment before re-assigning."
+        )
+
+    # 2. Rule: Check if the hostel already has an active staff of this role
+    role_label = "Warden" if role == StaffRoleChoices.WARDEN else "Caretaker"
+    existing_role_active = HostelStaffAssignment.objects.filter(
+        hostel=hostel, role=role, is_active=True
+    ).exists()
+
+    if existing_role_active:
+         raise HostelManagementException(
+            f"This hostel already has an active {role_label} assigned. "
+            "Please remove the existing assignment first."
+        )
+
+    # 3. Create the assignment
+    assignment = HostelStaffAssignment.objects.create(
+        hostel=hostel,
+        user=staff_user,
+        role=role,
+        start_date=start_date,
+        end_date=end_date,
+        is_active=True,
+        assigned_by=assigned_by
+    )
+
+    # 4. Write audit log
+    action_type = 'WARDEN_ASSIGNED' if role == StaffRoleChoices.WARDEN else 'CARETAKER_ASSIGNED'
+    HostelAuditLog.objects.create(
+        hostel=hostel,
+        action=action_type,
+        performed_by=assigned_by,
+        detail_json={
+            'user_id': staff_user.id,
+            'user_name': staff_user.get_full_name() or staff_user.username,
+            'start_date': str(assignment.start_date),
+            'role': role
+        }
+    )
+
+    return assignment
+
+
+def transfer_student_fines(student, new_hostel):
+    """
+    Transfers all unpaid/unwaived fines from previous hostels to the new hostel.
+    This ensures the new hostel's warden/caretaker can see and manage them.
+    - BR-HM-036: Fine Transfer on Re-allotment
+    """
+    unpaid_fines = HostelFine.objects.filter(
+        student=student,
+        status=FineStatusChoices.PENDING
+    )
+    
+    count = unpaid_fines.update(hostel=new_hostel)
+    return count
+
+
+@transaction.atomic
+def process_bulk_hostel_vacation(hostel_ids, performed_by):
+    """
+    Vacates multiple hostels (Semester End Process).
+    - Unallocates all students
+    - Resets room occupancy
+    - Cancels pending leaves/complaints
+    - Logs audit trail
+    """
+    target_hostels = Hostel.objects.filter(hall_id__in=hostel_ids)
+    
+    affected_count = 0
+    for hostel in target_hostels:
+        # 0. Pre-check: Skip if hostel has no active allotments, pending leaves, or complaints
+        active_count = RoomAllotment.objects.filter(hostel=hostel, is_active=True).count()
+        pending_leaves = LeaveRequest.objects.filter(
+            hostel=hostel,
+            status__in=[LeaveStatusChoices.PENDING, LeaveStatusChoices.APPROVED]
+        ).count()
+        pending_complaints = HostelComplaint.objects.filter(
+            hostel=hostel,
+            status__in=[ComplaintStatusChoices.SUBMITTED, ComplaintStatusChoices.IN_PROGRESS]
+        ).count()
+
+        if active_count == 0 and pending_leaves == 0 and pending_complaints == 0:
+            continue
+
+        affected_count += 1
+
+        # 1. Deactivate all allotments
+        active_allotments = RoomAllotment.objects.filter(
+            hostel=hostel, is_active=True
+        ).select_related('student__id__user')
+        
+        student_users = [a.student.id.user for a in active_allotments]
+        
+        active_allotments.update(
+            is_active=False,
+            vacated_at=timezone.now()
+        )
+        
+        # 2. Reset room occupancy
+        hostel.rooms_setup.update(
+            current_occupancy=0,
+            status='Available'
+        )
+        
+        # 3. Cancel pending/approved leaves
+        LeaveRequest.objects.filter(
+            hostel=hostel,
+            status__in=[LeaveStatusChoices.PENDING, LeaveStatusChoices.APPROVED]
+        ).update(
+            status=LeaveStatusChoices.CANCELLED,
+            decision_remarks="Cancelled due to semester-end hostel vacation.",
+            updated_at=timezone.now()
+        )
+        
+        # 4. Close pending complaints
+        HostelComplaint.objects.filter(
+            hostel=hostel,
+            status__in=[ComplaintStatusChoices.SUBMITTED, ComplaintStatusChoices.IN_PROGRESS]
+        ).update(
+            status=ComplaintStatusChoices.CLOSED,
+            resolution_remarks="Closed due to semester-end hostel vacation.",
+            updated_at=timezone.now()
+        )
+        
+        # 5. Audit Log
+        HostelAuditLog.objects.create(
+            hostel=hostel,
+            action='HOSTEL_VACATED',
+            performed_by=performed_by,
+            detail_json={
+                'allotments_deactivated': active_count,
+                'reason': 'Semester End Bulk Vacation'
+            }
+        )
+        
+        # 6. Notify students
+        for user in student_users:
+            from .services import notify
+            notify.send(
+                sender=performed_by,
+                recipient=user,
+                verb="notified hostel vacation",
+                description=f"Your room allotment in {hostel.name} has been vacated due to semester end."
+            )
+
+    return affected_count
