@@ -20,7 +20,7 @@ class IsHostelSuperAdmin(BasePermission):
     message = "Only Super Admins can perform this action."
 
     def has_permission(self, request, view):
-        return bool(
+        return bool(    
             request.user and 
             request.user.is_authenticated and 
             request.user.is_superuser
@@ -96,8 +96,8 @@ class HasActiveHostelAllotment(BasePermission):
         if not (request.user and request.user.is_authenticated):
             return False
         
-        # Staff and Super Admins always pass
-        if request.user.is_staff or request.user.is_superuser:
+        # Staff, Super Admins, and Warden/Caretakers always pass
+        if request.user.is_staff or request.user.is_superuser or selectors.is_user_warden_or_caretaker(request.user):
             return True
 
         # Check if student has active allotment
