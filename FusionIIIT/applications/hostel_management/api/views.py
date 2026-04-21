@@ -67,7 +67,8 @@ from applications.hostel_management.models import (
     InventoryItem, InventoryDiscrepancy, InventoryAuditLog as InventoryAuditTrail, ResourceRequest,
     InventoryCategory, InventoryCondition, DiscrepancyType, ResourceRequestType, ResourceRequestStatus,
     Notice, NoticeReadStatus, NoticeStatus, NoticePriority,
-    BookingStatusChoices, DamageSeverityChoices
+    BookingStatusChoices, DamageSeverityChoices,
+    SecurityGuard, GuardShift, ShiftScheduleLog
 )
 from . import serializers
 from .serializers import (
@@ -83,10 +84,11 @@ from .serializers import (
     StudentAttendanceRecordSerializer,
     InventoryItemSerializer, InventoryInspectionSerializer, InventoryItemUpdateSerializer,
     InventoryDiscrepancySerializer, InventoryAuditTrailSerializer,
-    ResourceRequestSerializer, ResourceRequestCreateSerializer, ResourceRequestReviewSerializer, BulkHostelVacationSerializer
+    ResourceRequestSerializer, ResourceRequestCreateSerializer, ResourceRequestReviewSerializer, BulkHostelVacationSerializer,
+    SecurityGuardSerializer, GuardShiftSerializer, ShiftScheduleLogSerializer
 )
 from .. import selectors, services
-from ..permissions import IsHostelSuperAdmin, IsAssignedToHostel, IsWardenOrAdmin, HasActiveHostelAllotment
+from ..permissions import IsHostelSuperAdmin, IsAssignedToHostel, IsWardenOrAdmin, HasActiveHostelAllotment, IsWarden
 from ..services import (
     HostelManagementException, LeaveEligibilityError, LeaveDateError,
     ComplaintEligibilityError, ComplaintRoutingError, ResolutionRemarksError,
@@ -351,6 +353,218 @@ class LeaveApproveView(generics.UpdateAPIView):
         """Debug post for approval."""
         print(f"DEBUG: LeaveApprove Attempt by {request.user} for ID {self.kwargs.get('pk')}")
         return self.patch(request, *args, **kwargs)
+
+    def list(self, request, *args, **kwargs):
+        queryset = self.get_queryset()
+        serializer = self.get_serializer(queryset, many=True)
+        return Response(serializer.data)
+
+
+# ══════════════════════════════════════════════════════════════
+# SECURITY MANAGEMENT VIEWS
+# ══════════════════════════════════════════════════════════════
+
+class ListGuardsView(generics.ListCreateAPIView):
+    """
+    List or register security guards.
+    - GET: Warden/Admin/Caretaker/Student view.
+    - POST: Warden only.
+    """
+    serializer_class = SecurityGuardSerializer
+    
+    def get_permissions(self):
+        if self.request.method == 'POST':
+            return [IsAuthenticated(), IsWarden()]
+        return [IsAuthenticated()]
+
+    def get_queryset(self):
+        user = self.request.user
+        if not user.is_superuser:
+            assigned_hostels = selectors.list_assigned_hostels(user)
+            assigned_ids = list(assigned_hostels.values_list('hall_id', flat=True))
+            return selectors.list_security_guards(hostel_ids=assigned_ids)
+        return selectors.list_security_guards()
+
+    def perform_create(self, serializer):
+        user = self.request.user
+        hostel_obj = serializer.validated_data.get('hostel')
+        
+        if not user.is_superuser:
+            assigned = selectors.list_assigned_hostels(user).first()
+            if not assigned:
+                from rest_framework.exceptions import ValidationError
+                raise ValidationError({"detail": "User has no assigned hostel to register guards."})
+            hostel_obj = assigned
+
+        data = serializer.validated_data.copy()
+        # Ensure 'hostel' is passed explicitly to service and removed from data
+        # to avoid 'multiple values for keyword argument' if data also has it
+        data.pop('hostel', None) 
+        services.register_security_guard(hostel=hostel_obj, **data)
+
+
+class SecurityGuardDetailView(generics.RetrieveUpdateDestroyAPIView):
+    """Retrieve, update or delete a security guard."""
+    permission_classes = [IsAuthenticated, IsWarden]
+    serializer_class = SecurityGuardSerializer
+
+    def get_queryset(self):
+        user = self.request.user
+        if not user.is_superuser:
+            assigned_ids = list(selectors.list_assigned_hostels(user).values_list('hall_id', flat=True))
+            return SecurityGuard.objects.filter(hostel_id__in=assigned_ids)
+        return SecurityGuard.objects.all()
+
+    def perform_update(self, serializer):
+        data = serializer.validated_data.copy()
+        
+        # Wardens cannot move guards between hostels
+        if not self.request.user.is_superuser:
+            data.pop('hostel', None)
+            
+        services.update_security_guard(
+            guard_id=self.kwargs['pk'], 
+            performed_by=self.request.user, 
+            **data
+        )
+
+    def perform_destroy(self, instance):
+        services.delete_security_guard(instance.id)
+
+
+class ListShiftsView(generics.ListAPIView):
+    """
+    List guard shifts scoped by hostel.
+    - GET: Scoped to assigned hostel for staff/students.
+    """
+    permission_classes = [IsAuthenticated]
+    serializer_class = GuardShiftSerializer
+
+    def get_queryset(self):
+        user = self.request.user
+        hostel_id = self.request.query_params.get('hostel')
+        date = self.request.query_params.get('date')
+        
+        # Scoping logic
+        if not user.is_superuser:
+            assigned_hostels = selectors.list_assigned_hostels(user)
+            assigned_ids = list(assigned_hostels.values_list('hall_id', flat=True))
+            
+            # If student, check their allotment
+            student = selectors.get_student(user)
+            if student:
+                allotment = selectors.get_active_allotment_by_student(student)
+                if allotment:
+                    assigned_ids.append(allotment.hostel.hall_id)
+            
+            if hostel_id:
+                if hostel_id not in assigned_ids:
+                    return GuardShift.objects.none()
+            else:
+                hostel_id = assigned_ids[0] if assigned_ids else None
+
+        return selectors.list_guard_shifts(hostel_id=hostel_id, date=date)
+
+
+class CreateShiftView(generics.CreateAPIView):
+    """Assign a shift to a guard (Warden only)."""
+    permission_classes = [IsAuthenticated, IsWarden]
+    serializer_class = GuardShiftSerializer
+
+    def perform_create(self, serializer):
+        user = self.request.user
+        hostel_obj = serializer.validated_data.get('hostel')
+
+        if not user.is_superuser:
+            assigned = selectors.list_assigned_hostels(user).first()
+            if not assigned:
+                from rest_framework.exceptions import ValidationError
+                raise ValidationError({"detail": "User has no assigned hostel to manage shifts."})
+            hostel_obj = assigned
+
+        try:
+            data = serializer.validated_data.copy()
+            data['hostel'] = hostel_obj
+            services.create_guard_shift(
+                assigned_by=self.request.user,
+                **data
+            )
+        except Exception as e:
+            from rest_framework.exceptions import ValidationError
+            raise ValidationError({"detail": str(e)})
+
+
+class UpdateShiftView(generics.UpdateAPIView):
+    """Update a shift (Warden only)."""
+    permission_classes = [IsAuthenticated, IsWarden]
+    serializer_class = GuardShiftSerializer
+    queryset = GuardShift.objects.all()
+
+    def perform_update(self, serializer):
+        try:
+            services.update_guard_shift(
+                shift_id=self.kwargs['pk'],
+                performed_by=self.request.user,
+                **serializer.validated_data
+            )
+        except Exception as e:
+            from rest_framework.exceptions import ValidationError
+            raise ValidationError({"detail": str(e)})
+
+
+class DeleteShiftView(generics.DestroyAPIView):
+    """Delete a shift (Warden only)."""
+    permission_classes = [IsAuthenticated, IsWarden]
+    queryset = GuardShift.objects.all()
+
+    def perform_destroy(self, instance):
+        services.delete_guard_shift(instance.id, self.request.user)
+
+
+class SecurityStatusDashboardView(generics.GenericAPIView):
+    """Dashboard metrics for security deployment (Warden only)."""
+    permission_classes = [IsAuthenticated, IsWarden]
+
+    def get(self, request):
+        user = request.user
+        hostel_id = request.query_params.get('hostel')
+        
+        assigned_hostels = selectors.list_assigned_hostels(user)
+        assigned_ids = list(assigned_hostels.values_list('hall_id', flat=True))
+
+        if not user.is_superuser:
+            if hostel_id and hostel_id not in assigned_ids:
+                return Response({"detail": "Unauthorized hostel access."}, status=status.HTTP_403_FORBIDDEN)
+            if not hostel_id:
+                hostel_id = assigned_ids[0] if assigned_ids else None
+            
+        if not hostel_id:
+             return Response({"detail": "No hostel identified."}, status=status.HTTP_400_BAD_REQUEST)
+
+        summary = selectors.get_security_deployment_summary(hostel_id)
+        return Response(summary)
+
+
+class ShiftAuditLogsView(generics.ListAPIView):
+    """Shift change audit logs (Warden/Admin only)."""
+    permission_classes = [IsAuthenticated, IsWardenOrAdmin]
+    serializer_class = ShiftScheduleLogSerializer
+
+    def get_queryset(self):
+        user = self.request.user
+        hostel_id = self.request.query_params.get('hostel')
+        
+        if not user.is_superuser:
+            assigned_hostels = selectors.list_assigned_hostels(user)
+            assigned_ids = list(assigned_hostels.values_list('hall_id', flat=True))
+            
+            if hostel_id:
+                if hostel_id not in assigned_ids:
+                    return ShiftScheduleLog.objects.none()
+            else:
+                hostel_id = assigned_ids[0] if assigned_ids else None
+
+        return selectors.list_shift_audit_logs(hostel_id=hostel_id)
 
     def patch(self, request, *args, **kwargs):
         """Debug patch for approval."""

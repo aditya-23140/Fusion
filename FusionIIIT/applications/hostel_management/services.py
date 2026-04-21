@@ -22,7 +22,8 @@ from .models import (
     ComplaintHistory, ComplaintCategoryChoices, ComplaintStatusChoices,
     LeaveStatusChoices, FineStatusChoices, BookingStatusChoices,
     AllocationChangeStatusChoices, FineCategoryChoices, FineExtraDetail,
-    Notice, NoticeReadStatus, NoticeStatus, NoticePriority
+    Notice, NoticeReadStatus, NoticeStatus, NoticePriority,
+    SecurityGuard, GuardShift, ShiftScheduleLog, ShiftTypeChoices, ShiftActionChoices
 )
 from notifications.signals import notify
 from django.db import transaction
@@ -142,6 +143,16 @@ class GuestRoomPolicyError(GuestRoomBookingError):
 
 class GuestRoomInspectionError(GuestRoomBookingError):
     """Raised during check-out if inspection fails."""
+    pass
+
+
+class GuardShiftConflictError(HostelManagementException):
+    """Raised when shift timing overlaps with existing shifts (BR-HM-016.a)."""
+    pass
+
+
+class GuardPolicyError(HostelManagementException):
+    """Raised when safety policies (rest periods, etc.) are violated."""
     pass
 
 
@@ -2907,3 +2918,159 @@ def process_bulk_hostel_vacation(hostel_ids, performed_by):
             )
 
     return affected_count
+
+
+# ══════════════════════════════════════════════════════════════
+# SECURITY MANAGEMENT SERVICES
+# ══════════════════════════════════════════════════════════════
+
+def register_security_guard(hostel=None, name=None, employee_id=None, contact=None, user=None, **kwargs):
+    """
+    Register a new security guard.
+    Warden registers guards for their own hostel.
+    """
+    if not hostel:
+         raise ValueError("Hostel is required for guard registration.")
+
+    return SecurityGuard.objects.create(
+        hostel=hostel,
+        name=name,
+        employee_id=employee_id,
+        contact=contact,
+        user=user,
+        **kwargs
+    )
+
+
+def create_guard_shift(assigned_by, guard, hostel, shift_type, date, start_time, end_time):
+    """
+    Assign a shift to a guard.
+    - BR-HM-016.a: Conflict Detection (overlaps)
+    - Immutable Audit Logging
+    """
+    # 1. Conflict Check
+    conflict = selectors.get_guard_conflict(guard.id, date, start_time, end_time)
+    if conflict:
+        raise GuardShiftConflictError(
+            f"Guard {guard.name} is already assigned to a shift ({conflict.shift_type}) at this time."
+        )
+
+    with transaction.atomic():
+        shift = GuardShift.objects.create(
+            guard=guard,
+            hostel=hostel,
+            shift_type=shift_type,
+            date=date,
+            start_time=start_time,
+            end_time=end_time,
+            assigned_by=assigned_by
+        )
+
+        _log_shift_action(
+            guard=guard,
+            hostel=hostel,
+            action=ShiftActionChoices.ASSIGNED,
+            performed_by=assigned_by,
+            detail_json={
+                "shift_id": shift.id,
+                "type": shift_type,
+                "date": str(date),
+                "start": str(start_time),
+                "end": str(end_time)
+            }
+        )
+
+    return shift
+
+
+def update_guard_shift(shift_id, performed_by, **kwargs):
+    """Update an existing shift with conflict re-validation."""
+    shift = GuardShift.objects.get(pk=shift_id)
+    
+    date = kwargs.get('date', shift.date)
+    start_time = kwargs.get('start_time', shift.start_time)
+    end_time = kwargs.get('end_time', shift.end_time)
+    
+    # Check conflict excluding itself
+    conflict = selectors.get_guard_conflict(shift.guard_id, date, start_time, end_time, exclude_shift_id=shift_id)
+    if conflict:
+        raise GuardShiftConflictError("Update failed: User has a conflicting shift at the new time.")
+
+    with transaction.atomic():
+        for field, value in kwargs.items():
+            setattr(shift, field, value)
+        shift.save()
+
+        _log_shift_action(
+            guard=shift.guard,
+            hostel=shift.hostel,
+            action=ShiftActionChoices.MODIFIED,
+            performed_by=performed_by,
+            detail_json={"shift_id": shift.id, "changes": kwargs}
+        )
+    
+    return shift
+
+
+def delete_guard_shift(shift_id, performed_by):
+    """Remove a shift and log the action."""
+    shift = GuardShift.objects.get(pk=shift_id)
+    with transaction.atomic():
+        _log_shift_action(
+            guard=shift.guard,
+            hostel=shift.hostel,
+            action=ShiftActionChoices.REMOVED,
+            performed_by=performed_by,
+            detail_json={"shift_id": shift_id, "type": shift.shift_type, "date": str(shift.date)}
+        )
+        shift.delete()
+
+
+def _log_shift_action(guard, hostel, action, performed_by, detail_json):
+    """Internal: Maintain immutable security audit trail."""
+    # Ensure guard info is preserved even if the record is later deleted
+    data = detail_json or {}
+    if guard:
+        data.update({
+            "guard_name": guard.name,
+            "guard_employee_id": guard.employee_id
+        })
+        
+    ShiftScheduleLog.objects.create(
+        guard=guard,
+        hostel=hostel,
+        action=action,
+        performed_by=performed_by,
+        detail_json=data
+    )
+
+
+def update_security_guard(guard_id, performed_by=None, **kwargs):
+    """Update security guard profile and log the action."""
+    guard = SecurityGuard.objects.get(pk=guard_id)
+    
+    # Track changed fields for logging
+    changes = {}
+    for field, value in kwargs.items():
+        if hasattr(guard, field) and field not in ['id', 'created_at', 'hostel']:
+            old_value = getattr(guard, field)
+            if old_value != value:
+                changes[field] = {"old": str(old_value), "new": str(value)}
+                setattr(guard, field, value)
+    
+    if changes:
+        with transaction.atomic():
+            guard.save()
+            _log_shift_action(
+                guard=guard,
+                hostel=guard.hostel,
+                action=ShiftActionChoices.MODIFIED,
+                performed_by=performed_by,
+                detail_json={"action": "Profile Update", "changes": changes}
+            )
+    return guard
+
+
+def delete_security_guard(guard_id):
+    """Remove a security guard from the registry."""
+    SecurityGuard.objects.filter(pk=guard_id).delete()

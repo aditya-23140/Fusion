@@ -146,6 +146,19 @@ class DamageSeverityChoices(models.TextChoices):
     MODERATE = "Moderate", "Moderate"
     MAJOR = "Major", "Major"
     SEVERE = "Severe", "Severe"
+    
+
+class ShiftTypeChoices(models.TextChoices):
+    MORNING = "Morning", "Morning"
+    EVENING = "Evening", "Evening"
+    NIGHT = "Night", "Night"
+    CUSTOM = "Custom", "Custom"
+
+
+class ShiftActionChoices(models.TextChoices):
+    ASSIGNED = "Assigned", "Assigned"
+    MODIFIED = "Modified", "Modified"
+    REMOVED = "Removed", "Removed"
 
 
 class HostelManagementConstants:
@@ -796,6 +809,75 @@ class InventoryAuditLog(models.Model):
     def save(self, *args, **kwargs):
         if self.pk:
             raise PermissionError("InventoryAuditLog entries are immutable and cannot be updated.")
+        super().save(*args, **kwargs)
+
+
+class SecurityGuard(models.Model):
+    """
+    Records security guards assigned to hostels.
+    """
+    user = models.OneToOneField(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='security_guard_profile')
+    hostel = models.ForeignKey(Hostel, on_delete=models.CASCADE, related_name='security_guards', null=True, blank=True)
+    name = models.CharField(max_length=100)
+    employee_id = models.CharField(max_length=50, unique=True)
+    contact = models.CharField(max_length=15)
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'hostel_management_securityguard'
+        ordering = ['name']
+
+    def __str__(self):
+        return f"{self.name} ({self.employee_id})"
+
+
+class GuardShift(models.Model):
+    """
+    Shifts assigned to guards for specific hostels and dates.
+    """
+    hostel = models.ForeignKey(Hostel, on_delete=models.CASCADE, related_name='guard_shifts', to_field='hall_id')
+    guard = models.ForeignKey(SecurityGuard, on_delete=models.CASCADE, related_name='shifts')
+    shift_type = models.CharField(max_length=20, choices=ShiftTypeChoices.choices, default=ShiftTypeChoices.MORNING)
+    date = models.DateField()
+    start_time = models.TimeField()
+    end_time = models.TimeField()
+    assigned_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, related_name='assigned_shifts')
+    is_confirmed = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'hostel_management_guardshift'
+        unique_together = ['guard', 'date', 'start_time']
+        ordering = ['-date', 'start_time']
+
+    def __str__(self):
+        return f"{self.guard.name} - {self.date} ({self.shift_type})"
+
+
+class ShiftScheduleLog(models.Model):
+    """
+    IMMUTABLE log for any actions on guard shifts.
+    """
+    hostel = models.ForeignKey(Hostel, on_delete=models.CASCADE, to_field='hall_id')
+    guard = models.ForeignKey(SecurityGuard, on_delete=models.CASCADE, null=True, blank=True)
+    action = models.CharField(max_length=20, choices=ShiftActionChoices.choices)
+    performed_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True)
+    detail_json = models.JSONField(default=dict)
+    timestamp = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'hostel_management_shiftschedulelog'
+        ordering = ['-timestamp']
+
+    def delete(self, *args, **kwargs):
+        raise PermissionError("ShiftScheduleLog entries are immutable and cannot be deleted.")
+
+    def save(self, *args, **kwargs):
+        if self.pk:
+            raise PermissionError("ShiftScheduleLog entries are immutable and cannot be updated.")
         super().save(*args, **kwargs)
 
 

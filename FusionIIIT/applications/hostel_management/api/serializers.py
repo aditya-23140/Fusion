@@ -55,7 +55,8 @@ from ..models import (
     AllocationChangeStatusChoices, FineCategoryChoices, FineExtraDetail,
     InventoryItem, InventoryDiscrepancy, InventoryAuditLog as InventoryAuditTrail, ResourceRequest,
     InventoryCategory, InventoryCondition, DiscrepancyType, ResourceRequestType, ResourceRequestStatus,
-    Notice, NoticeReadStatus, NoticeStatus, NoticePriority
+    Notice, NoticeReadStatus, NoticeStatus, NoticePriority,
+    SecurityGuard, GuardShift, ShiftScheduleLog, ShiftTypeChoices, ShiftActionChoices
 )
 from applications.academic_information.models import Student
 from applications.globals.models import Staff, Faculty
@@ -1183,3 +1184,46 @@ class BulkHostelVacationSerializer(serializers.Serializer):
         if invalid_hostels:
             raise serializers.ValidationError(f"Invalid hostel IDs: {', '.join(invalid_hostels)}")
         return value
+
+
+# ══════════════════════════════════════════════════════════════
+# SECURITY MANAGEMENT SERIALIZERS (NEW)
+# ══════════════════════════════════════════════════════════════
+
+class SecurityGuardSerializer(serializers.ModelSerializer):
+    """Serializer for Security Guard profile."""
+    class Meta:
+        model = SecurityGuard
+        fields = ['id', 'user', 'hostel', 'name', 'employee_id', 'contact', 'is_active', 'created_at']
+        read_only_fields = ['id', 'created_at']
+
+
+class GuardShiftSerializer(serializers.ModelSerializer):
+    """Serializer for Guard Shift assignments."""
+    guard_name = serializers.CharField(source='guard.name', read_only=True)
+    hostel_name = serializers.CharField(source='hostel.name', read_only=True)
+    assigned_by_name = serializers.CharField(source='assigned_by.username', read_only=True)
+
+    class Meta:
+        model = GuardShift
+        fields = [
+            'id', 'hostel', 'hostel_name', 'guard', 'guard_name', 
+            'shift_type', 'start_time', 'end_time', 'date', 
+            'assigned_by', 'assigned_by_name', 'is_confirmed', 'created_at'
+        ]
+        read_only_fields = ['id', 'assigned_by', 'created_at', 'guard_name', 'hostel_name', 'assigned_by_name']
+
+
+class ShiftScheduleLogSerializer(serializers.ModelSerializer):
+    """Read-only serializer for shift audit logs."""
+    guard_name = serializers.CharField(source='guard.name', read_only=True)
+    hostel_name = serializers.CharField(source='hostel.name', read_only=True)
+    performed_by_name = serializers.CharField(source='performed_by.username', read_only=True)
+
+    class Meta:
+        model = ShiftScheduleLog
+        fields = [
+            'id', 'hostel', 'hostel_name', 'guard', 'guard_name', 
+            'action', 'performed_by', 'performed_by_name', 'detail_json', 'timestamp'
+        ]
+        read_only_fields = fields
