@@ -1441,6 +1441,9 @@ class HostelFine(models.Model):
     imposed_date = models.DateTimeField(auto_now_add=True)
     paid_date = models.DateTimeField(null=True, blank=True)
     fine_uid = models.CharField(max_length=24, unique=True)
+    waived_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='fines_waived')
+    waive_reason = models.TextField(null=True, blank=True)
+    updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
         db_table = 'hostel_management_hostelfine'

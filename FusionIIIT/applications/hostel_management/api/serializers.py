@@ -615,6 +615,7 @@ class HostelFineSerializer(serializers.ModelSerializer):
     student_name = serializers.CharField(source='student.id.user.get_full_name', read_only=True)
     student_roll = serializers.CharField(source='student.id.id', read_only=True)
     imposed_by_name = serializers.CharField(source='imposed_by.get_full_name', read_only=True)
+    waived_by_name = serializers.CharField(source='waived_by.get_full_name', read_only=True)
     hostel_name = serializers.CharField(source='hostel.name', read_only=True)
     extra_details = FineExtraDetailSerializer(many=True, read_only=True)
     
@@ -624,7 +625,8 @@ class HostelFineSerializer(serializers.ModelSerializer):
             'id', 'fine_uid', 'student', 'student_name', 'student_roll',
             'hostel', 'hostel_name', 'category', 'amount', 'reason',
             'evidence', 'status', 'imposed_date', 'paid_date',
-            'imposed_by', 'imposed_by_name', 'extra_details'
+            'imposed_by', 'imposed_by_name', 'waived_by', 'waived_by_name',
+            'waive_reason', 'updated_at', 'extra_details'
         ]
         read_only_fields = fields
 

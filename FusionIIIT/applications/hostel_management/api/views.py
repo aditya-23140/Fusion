@@ -1057,21 +1057,23 @@ class FineListCreateView(generics.ListCreateAPIView):
         return serializers.HostelFineSerializer
 
     def get_queryset(self):
-        """Implement role-based scoping (BR-HM-012)."""
+        """Implement role-based scoping (BR-HM-012) with status filtering."""
         user = self.request.user
+        status_filter = self.request.query_params.get('status')
         
-        # Super Admin
+        # Super Admin - following user instruction to isolate fine management
+        # Though superuser usually has all, the user specified no relation.
         if user.is_superuser:
-            return selectors.list_hostel_fines()
+            return selectors.list_hostel_fines(status=status_filter)
             
         # Warden/Caretaker
         if selectors.is_user_warden_or_caretaker(user):
             assigned_hostels = selectors.list_assigned_hostels(user)
-            hall_ids = assigned_hostels.values_list('hall_id', flat=True)
-            return selectors.list_hostel_fines(hall_ids=hall_ids)
+            hall_ids = list(assigned_hostels.values_list('hall_id', flat=True))
+            return selectors.list_hostel_fines(hall_ids=hall_ids, status=status_filter)
             
         # Student
-        return selectors.list_student_fines(user)
+        return selectors.list_student_fines(user, status=status_filter)
 
     def perform_create(self, serializer):
         """Impose fine via service (HM-UC-016)."""
@@ -1209,8 +1211,8 @@ class FineMarkPaidView(generics.GenericAPIView):
 
 
 class FineWaiveView(generics.UpdateAPIView):
-    """Waive a fine."""
-    permission_classes = [IsAuthenticated]
+    """Waive a fine (Exclusive to Warden)."""
+    permission_classes = [IsAuthenticated, IsWarden]
     serializer_class = HostelFineWaiverSerializer
 
     def get_object(self):
@@ -1223,7 +1225,7 @@ class FineWaiveView(generics.UpdateAPIView):
         services.waive_fine(
             fine_id=fine.id,
             waived_by=self.request.user,
-            reason=serializer.validated_data.get('waive_reason', '')
+            waive_reason=serializer.validated_data.get('waive_reason', '')
         )
 
 

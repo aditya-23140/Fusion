@@ -1326,19 +1326,23 @@ def get_student_complaints(user):
     ).order_by('-created_at')
 
 
-def list_student_fines(user):
+def list_student_fines(user, status=None):
     """List all fines for a specific student."""
     student = get_student(user.id)
     if not student:
         return HostelFine.objects.none()
-    return HostelFine.objects.filter(student=student).select_related(
+    queryset = HostelFine.objects.filter(student=student).select_related(
         'student__id__user', 
         'hostel', 
         'imposed_by'
     ).prefetch_related('extra_details').order_by('-imposed_date')
+    
+    if status:
+        queryset = queryset.filter(status=status)
+    return queryset
 
 
-def list_hostel_fines(hall_ids=None):
+def list_hostel_fines(hall_ids=None, status=None):
     """List fines for specific hostels or all if none provided."""
     queryset = HostelFine.objects.all().select_related(
         'student__id__user', 
@@ -1348,6 +1352,9 @@ def list_hostel_fines(hall_ids=None):
     
     if hall_ids is not None:
         queryset = queryset.filter(hostel__hall_id__in=hall_ids)
+    
+    if status:
+        queryset = queryset.filter(status=status)
     return queryset
 
 
