@@ -332,6 +332,68 @@ def mark_attendance_bulk(date, attendance_data):
     return records
 
 
+def process_attendance_excel(hall_id, date, excel_file):
+    """
+    Process attendance from an Excel file for a specific date and hostel.
+    Expected Format: Col A: Roll Number, Col B: Status (Present/Absent).
+    """
+    import openpyxl
+    from applications.academic_information.models import Student
+    from .models import AttendanceStatus
+
+    # Get roll numbers of students currently allotted to this hostel
+    valid_roll_numbers = set(Student.objects.filter(
+        room_allotments__hostel__hall_id=hall_id,
+        room_allotments__is_active=True
+    ).values_list('id__id', flat=True))
+
+    wb = openpyxl.load_workbook(excel_file)
+    sheet = wb.active
+    
+    records = []
+    errors = []
+    
+    with transaction.atomic():
+        for row_idx, row in enumerate(sheet.iter_rows(min_row=2, values_only=True), start=2):
+            if not row or len(row) < 2:
+                continue
+                
+            roll_no, status_str = row[0], row[1]
+            if roll_no is None:
+                continue
+                
+            # Handle cases where openpyxl might read number as float (e.g. 2021001.0)
+            if isinstance(roll_no, float):
+                roll_no = int(roll_no)
+            
+            roll_no = str(roll_no).strip()
+            if roll_no not in valid_roll_numbers:
+                errors.append(f"Row {row_idx}: Student {roll_no} not allotted to this hostel.")
+                continue
+            
+            status_str = str(status_str).strip().lower()
+            if status_str in ['p', 'present']:
+                status = AttendanceStatus.PRESENT
+            elif status_str in ['a', 'absent']:
+                status = AttendanceStatus.ABSENT
+            else:
+                errors.append(f"Row {row_idx}: Invalid status '{status_str}' for {roll_no}.")
+                continue
+            
+            student = Student.objects.get(id__id=roll_no)
+            record, created = StudentAttendanceRecord.objects.update_or_create(
+                student=student,
+                date=date,
+                defaults={'status': status}
+            )
+            records.append(record)
+            
+    return {
+        'records_count': len(records),
+        'errors': errors
+    }
+
+
 # ══════════════════════════════════════════════════════════════
 # HM-WF-102: COMPLAINT MANAGEMENT SERVICES
 # ══════════════════════════════════════════════════════════════

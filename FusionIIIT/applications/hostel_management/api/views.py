@@ -1713,6 +1713,71 @@ class AttendanceMarkView(generics.CreateAPIView):
             return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
 
+class AttendanceBulkUploadView(generics.GenericAPIView):
+    """Bulk mark attendance via Excel upload."""
+    permission_classes = [IsWardenOrCaretaker]
+    parser_classes = [parsers.MultiPartParser]
+
+    def post(self, request, *args, **kwargs):
+        hall_id = request.data.get('hall_id')
+        date_str = request.data.get('date')
+        excel_file = request.FILES.get('file')
+
+        if not all([hall_id, date_str, excel_file]):
+            return Response({'error': 'hall_id, date, and file are required.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            date = datetime.strptime(date_str, '%Y-%m-%d').date()
+            result = services.process_attendance_excel(hall_id, date, excel_file)
+            return Response(result, status=status.HTTP_200_OK)
+        except Exception as e:
+            return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+
+class AttendanceSummaryView(generics.ListAPIView):
+    """Get attendance statistics for all students in a hostel."""
+    permission_classes = [IsWardenOrCaretaker]
+    serializer_class = serializers.AttendanceSummarySerializer
+    pagination_class = StandardPagination
+
+    def get_queryset(self):
+        hall_id = self.request.query_params.get('hall_id')
+        if not hall_id:
+            from applications.academic_information.models import Student
+            return Student.objects.none()
+        return selectors.get_hostel_attendance_summary(hall_id)
+
+
+class StudentAttendanceStatsView(generics.RetrieveAPIView):
+    """Get personal attendance statistics and absence dates."""
+    permission_classes = [IsStudent | IsWardenOrCaretaker]
+    
+    def get(self, request, *args, **kwargs):
+        student_id = self.kwargs.get('pk')
+        
+        # If no PK provided, assume current student
+        if not student_id:
+            student = selectors.get_student(request.user)
+            if not student:
+                return Response({'error': 'Student profile not found.'}, status=status.HTTP_404_NOT_FOUND)
+            student_id = student.pk
+        
+        # RBAC: Students only authorized for their own ID
+        if not selectors.is_user_warden_or_caretaker(request.user):
+            student = selectors.get_student(request.user)
+            if str(student.pk) != str(student_id):
+                 return Response({'error': 'Access denied.'}, status=status.HTTP_403_FORBIDDEN)
+
+        stats = selectors.get_student_attendance_stats(student_id)
+        absences = selectors.list_student_absences(student_id)
+        absences_serializer = serializers.AbsenceDateSerializer(absences, many=True)
+        
+        return Response({
+            'stats': stats,
+            'absence_dates': [d['date'] for d in absences_serializer.data]
+        })
+
+
 # ══════════════════════════════════════════════════════════════
 # HOSTEL SETUP FOUNDATION VIEWS
 # ══════════════════════════════════════════════════════════════

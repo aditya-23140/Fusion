@@ -1022,6 +1022,45 @@ def list_date_attendance_range(hall_id, start_date, end_date):
     ).order_by('-date', 'student__id__user__username')
 
 
+def get_hostel_attendance_summary(hall_id):
+    """
+    Get attendance summary for all students in a hostel.
+    Returns queryset with statistics per student.
+    """
+    from .models import AttendanceStatus
+    
+    # Get students currently allotted to this hostel
+    allotted_students = Student.objects.filter(
+        room_allotments__hostel__hall_id=hall_id,
+        room_allotments__is_active=True
+    ).select_related('id__user')
+
+    return allotted_students.annotate(
+        present_count=Count('attendance_records', filter=Q(attendance_records__status=AttendanceStatus.PRESENT)),
+        absent_count=Count('attendance_records', filter=Q(attendance_records__status=AttendanceStatus.ABSENT)),
+        on_leave_count=Count('attendance_records', filter=Q(attendance_records__status=AttendanceStatus.ON_LEAVE))
+    ).order_by('id__user__username')
+
+
+def get_student_attendance_stats(student_id):
+    """Get attendance statistics for a single student."""
+    from .models import AttendanceStatus
+    return StudentAttendanceRecord.objects.filter(student_id=student_id).aggregate(
+        present_count=Count('id', filter=Q(status=AttendanceStatus.PRESENT)),
+        absent_count=Count('id', filter=Q(status=AttendanceStatus.ABSENT)),
+        on_leave_count=Count('id', filter=Q(status=AttendanceStatus.ON_LEAVE))
+    )
+
+
+def list_student_absences(student_id):
+    """List all dates where a student was marked absent."""
+    from .models import AttendanceStatus
+    return StudentAttendanceRecord.objects.filter(
+        student_id=student_id,
+        status=AttendanceStatus.ABSENT
+    ).order_by('-date')
+
+
 def get_transaction_history(transaction_id):
     """Get a specific transaction history record."""
     return HostelTransactionHistory.objects.filter(id=transaction_id).first()

@@ -1089,12 +1089,30 @@ class ExtendedStayApplicationSerializer(serializers.ModelSerializer):
 class StudentAttendanceRecordSerializer(serializers.ModelSerializer):
     """Serializer for modern student attendance records."""
     student_name = serializers.CharField(source='student.id.user.username', read_only=True)
-    roll_number = serializers.CharField(source='student.id.user.username', read_only=True)
+    roll_number = serializers.CharField(source='student.id.id', read_only=True)
     
     class Meta:
         model = StudentAttendanceRecord
         fields = ['id', 'student', 'student_name', 'roll_number', 'date', 'status', 'leave_request']
         read_only_fields = ['id', 'student_name', 'roll_number']
+
+
+class AttendanceSummarySerializer(serializers.Serializer):
+    """Serializer for the caretaker dashboard showing attendance statistics per student."""
+    id = serializers.CharField(source='id.id', read_only=True)
+    name = serializers.CharField(source='id.user.get_full_name', read_only=True)
+    roll_number = serializers.CharField(source='id.id', read_only=True)
+    present_count = serializers.IntegerField(read_only=True)
+    absent_count = serializers.IntegerField(read_only=True)
+    on_leave_count = serializers.IntegerField(read_only=True)
+
+
+class AbsenceDateSerializer(serializers.ModelSerializer):
+    """Simple serializer for listing absence dates."""
+    class Meta:
+        model = StudentAttendanceRecord
+        fields = ['date']
+        read_only_fields = fields
 
 
     def get_total_rooms(self, obj):

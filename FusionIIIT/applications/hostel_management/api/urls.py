@@ -150,6 +150,10 @@ guest_booking_patterns = [
 attendance_patterns = [
     path('hostel/<str:hall_id>/', views.AttendanceByHostelView.as_view(), name='attendance-list'),
     path('mark/', views.AttendanceMarkView.as_view(), name='attendance-mark'),
+    path('upload/', views.AttendanceBulkUploadView.as_view(), name='attendance-upload'),
+    path('summary/', views.AttendanceSummaryView.as_view(), name='attendance-summary'),
+    path('student/', views.StudentAttendanceStatsView.as_view(), name='attendance-student-stats'),
+    path('student/<str:pk>/', views.StudentAttendanceStatsView.as_view(), name='attendance-student-stats-pk'),
 ]
 
 # ══════════════════════════════════════════════════════════════
