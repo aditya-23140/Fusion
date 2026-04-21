@@ -6,7 +6,7 @@ These enforce role-based access control across all hostel setup endpoints.
 """
 
 from rest_framework.permissions import BasePermission
-from .models import HostelStaffAssignment, SecurityGuard, GuardShift
+from .models import SecurityGuard, GuardShift
 from . import selectors
 
 

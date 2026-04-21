@@ -18,23 +18,22 @@ from django.utils import timezone
 from datetime import timedelta
 
 from .models import (
-    LeaveRequest, StudentAttendanceRecord, AttendanceStatus,
-    HostelComplaint, RoomAllocationChange,
-    HostelFine, StaffSchedule, HostelInventory,
-    HostelNoticeBoard, GuestRoom, GuestRoomBooking,
-    HostelTransactionHistory, WorkerReport,
-    Hall, HallWarden, HallCaretaker, StudentDetails,
-    LeaveStatusChoices, ComplaintStatusChoices, ComplaintPriorityChoices,
-    FineStatusChoices, BookingStatusChoices,
-    AccommodationApplicationWindow, AccommodationRequest, RoomAllotment,
-    HostelTypeChoices, RoomTypeChoices,
+    LeaveRequest, StudentAttendanceRecord, HostelComplaint,
+    RoomAllocationChange, HostelFine,
+    StaffSchedule, HostelInventory, HostelNoticeBoard,
+    GuestRoom, GuestRoomBooking, HostelTransactionHistory,
+    WorkerReport, HallWarden,
+    HallCaretaker, StudentDetails, LeaveStatusChoices, ComplaintStatusChoices,
+    ComplaintPriorityChoices, FineStatusChoices, AccommodationApplicationWindow,
+    AccommodationRequest, RoomAllotment,
     Hostel, Room, HostelStaffAssignment,
-    InventoryItem, InventoryDiscrepancy, InventoryAuditLog, ResourceRequest,
-    ResourceRequestStatus, Notice, NoticeReadStatus, NoticeStatus,
-    SecurityGuard, GuardShift, ShiftScheduleLog, ShiftTypeChoices, ShiftActionChoices
+    InventoryItem, InventoryDiscrepancy,
+    InventoryAuditLog, ResourceRequest, Notice,
+    NoticeReadStatus, NoticeStatus, SecurityGuard, GuardShift,
+    ShiftScheduleLog
 )
 from applications.academic_information.models import Student
-from applications.globals.models import Staff, Faculty
+from applications.globals.models import Staff
 
 
 def get_student_by_roll(roll_number):
@@ -1033,7 +1032,6 @@ def list_guest_bookings_scoped(user, filters=None):
     """
     List bookings based on user role and filters.
     """
-    from .models import BookingStatusChoices
     
     if user.is_superuser:
         queryset = GuestRoomBooking.objects.all()

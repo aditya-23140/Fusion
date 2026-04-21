@@ -14,16 +14,16 @@ from decimal import Decimal
 from .models import (
     LeaveRequest, StudentAttendanceRecord, AttendanceStatus,
     HostelComplaint, RoomAllocationChange,
-    HostelFine, StaffSchedule, HostelInventory, HostelNoticeBoard,
-    GuestRoomBooking, GuestRoom, Hostel, Room, RoomAllotment,
-    HostelStaffAssignment, HostelAuditLog,
-    AccommodationApplicationWindow, AccommodationRequest,
-    StaffRoleChoices, RoomSetupStatusChoices,
-    ComplaintHistory, ComplaintCategoryChoices, ComplaintStatusChoices,
+    HostelFine, GuestRoomBooking, GuestRoom, Hostel,
+    Room, RoomAllotment, HostelStaffAssignment, HostelAuditLog, AccommodationApplicationWindow,
+    AccommodationRequest, StaffRoleChoices,
+    RoomSetupStatusChoices, ComplaintHistory,
+    ComplaintCategoryChoices, ComplaintStatusChoices,
     LeaveStatusChoices, FineStatusChoices, BookingStatusChoices,
     AllocationChangeStatusChoices, FineCategoryChoices, FineExtraDetail,
-    Notice, NoticeReadStatus, NoticeStatus, NoticePriority,
-    SecurityGuard, GuardShift, ShiftScheduleLog, ShiftTypeChoices, ShiftActionChoices
+    Notice, NoticeReadStatus, NoticeStatus,
+    NoticePriority, SecurityGuard, GuardShift, ShiftScheduleLog,
+    ShiftActionChoices
 )
 from notifications.signals import notify
 from django.db import transaction
@@ -37,92 +37,74 @@ from . import selectors
 
 class HostelManagementException(Exception):
     """Base exception for hostel management errors."""
-    pass
 
 
 class LeaveEligibilityError(HostelManagementException):
     """Raised when leave eligibility is not met (BR-HM-101)."""
-    pass
 
 
 class LeaveDateError(HostelManagementException):
     """Raised when leave dates are invalid (BR-HM-102)."""
-    pass
 
 
 class LeaveJustificationError(HostelManagementException):
     """Raised when leave lacks justification (BR-HM-103)."""
-    pass
 
 
 class LeaveAuthorityError(HostelManagementException):
     """Raised when leave decision maker lacks authority (BR-HM-104)."""
-    pass
 
 
 class FineValidationError(HostelManagementException):
     """Raised when fine parameters violate business rules (BR-HM-013)."""
-    pass
 
 
 class ComplaintEligibilityError(HostelManagementException):
     """Raised when complaint eligibility is not met (BR-HM-106)."""
-    pass
 
 
 class ComplaintRoutingError(HostelManagementException):
     """Raised when complaint routing fails (BR-HM-107)."""
-    pass
 
 
 class ResolutionRemarksError(HostelManagementException):
     """Raised when resolution remarks are missing (BR-HM-108)."""
-    pass
 
 
 class EscalationAuthorizationError(HostelManagementException):
     """Raised when escalation is not authorized (BR-HM-109)."""
-    pass
 
 
 class WardenAuthorityError(HostelManagementException):
     """Raised when warden authority is required (BR-HM-110)."""
-    pass
 
 
 class ApplicationWindowError(HostelManagementException):
     """Raised when application window is closed (BR-HM-111)."""
-    pass
 
 
 class AllotmentCapacityError(HostelManagementException):
     """Raised when room capacity would be exceeded (BR-HM-112)."""
-    pass
 
 
 class RoomChangeEligibilityError(HostelManagementException):
     """Raised when student is not eligible for room change (BR-HM-115)."""
-    pass
 
 
 class DualApprovalError(HostelManagementException):
     """Raised when dual approval requirement is not met (BR-HM-116)."""
-    pass
 
 
 class OccupancyReconciliationError(HostelManagementException):
     """Raised when occupancy reconciliation fails (BR-HM-117)."""
-    pass
 
 
 class RoomVacationPrerequisiteError(HostelManagementException):
     """Raised when room vacation prerequisites are not met (BR-015)."""
-    pass
 
 
 class FineValidationError(HostelManagementException):
     """Raised when fine validation fails (BR-HM-013)."""
-    pass
 
 
 # ══════════════════════════════════════════════════════════════
@@ -131,29 +113,23 @@ class FineValidationError(HostelManagementException):
 
 class GuestRoomBookingError(HostelManagementException):
     """Base exception for guest room booking errors."""
-    pass
 
 class GuestRoomAvailabilityError(GuestRoomBookingError):
     """Raised when room is not available for requested dates."""
-    pass
 
 class GuestRoomPolicyError(GuestRoomBookingError):
     """Raised when booking violates hostel policies."""
-    pass
 
 class GuestRoomInspectionError(GuestRoomBookingError):
     """Raised during check-out if inspection fails."""
-    pass
 
 
 class GuardShiftConflictError(HostelManagementException):
     """Raised when shift timing overlaps with existing shifts (BR-HM-016.a)."""
-    pass
 
 
 class GuardPolicyError(HostelManagementException):
     """Raised when safety policies (rest periods, etc.) are violated."""
-    pass
 
 
 # ══════════════════════════════════════════════════════════════
@@ -516,6 +492,7 @@ def create_complaint(student, category, description, attachments=None):
         )
 
     return complaint
+
 
 def update_complaint_to_in_progress(complaint_id, staff_user, remarks=""):
     """Mark complaint as InProgress when staff starts working on it."""
@@ -1476,16 +1453,6 @@ def submit_leave_request(student, start_date, end_date, reason, destination=None
 
 
 
-
-def update_complaint(complaint_id, status=None, resolution_notes=None):
-    """Wrapper for update_complaint_status — called by ComplaintRetrieveUpdateView."""
-    if status:
-        return update_complaint_status(complaint_id, status, resolution_notes)
-    return selectors.get_complaint(complaint_id)
-
-
-
-
 def approve_room_change(change_id, approved_by, remarks=None):
     """Unified room change approval — determines warden vs caretaker step.
     
@@ -2142,7 +2109,7 @@ def submit_resource_request(hostel_id, requester, request_type, category, item_n
     Submit resource procurement request (HM-UC-022).
     - BR-HM-030.a/b: Mandatory fields and quantity validation
     """
-    from .models import ResourceRequest, Hostel, ResourceRequestType
+    from .models import ResourceRequest, Hostel
     
     if not all([hostel_id, request_type, item_name, quantity, justification]):
         raise HostelManagementException("All fields (hostel, type, item, quantity, justification) are mandatory.")
@@ -2281,7 +2248,6 @@ def bulk_upload_inventory(hostel_id, excel_file, user):
                     item.current_quantity = curr_qty
                 item.save()
                 updated_count += 1
-                is_new = False
             else:
                 item = InventoryItem.objects.create(
                     hostel=hostel,
@@ -2293,7 +2259,6 @@ def bulk_upload_inventory(hostel_id, excel_file, user):
                     condition=InventoryCondition.GOOD
                 )
                 created_count += 1
-                is_new = True
 
             InventoryAuditLog.objects.create(
                 item=item,

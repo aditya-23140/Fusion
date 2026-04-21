@@ -1,8 +1,6 @@
-import datetime
 from django.db import models
-from django.db.models import Q, UniqueConstraint
 from django.contrib.auth.models import User
-from applications.globals.models import ExtraInfo, Staff, Faculty
+from applications.globals.models import Staff, Faculty
 from applications.academic_information.models import Student
 from django.utils import timezone
 
@@ -1010,10 +1008,9 @@ class HostelComplaint(models.Model):
     def save(self, *args, **kwargs):
         """Auto-generate complaint UID if not present."""
         if not self.complaint_uid:
-            date_str = timezone.now().strftime('%Y%m%d')
+            timezone.now().strftime('%Y%m%d')
             # The actual unique suffix will be handled by the service or we can use a basic one here
             # But UID generation is better in service for atomic sequence
-            pass
         super().save(*args, **kwargs)
 
     @property

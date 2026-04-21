@@ -23,52 +23,34 @@ Supports Workflows:
 - HM-WF-113: Extended Stay
 """
 
-from datetime import datetime, timedelta
+from datetime import datetime
 from django.utils import timezone
-from rest_framework import generics, status, parsers
+from rest_framework import generics, status, parsers, viewsets
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated, IsAdminUser, BasePermission
 from rest_framework.pagination import PageNumberPagination
+from rest_framework.decorators import action
 from django.shortcuts import get_object_or_404
-from django.db.models import Sum, Count
 from django.contrib.auth.models import User
 from applications.globals.models import Staff
 from applications.globals.models import Faculty
 from applications.hostel_management.models import (
-    LeaveRequest, StudentAttendanceRecord, AttendanceStatus,
-    HostelComplaint,
+    LeaveRequest, StudentAttendanceRecord, HostelComplaint,
     RoomAllocationChange,
     HostelFine,
     StaffSchedule,
-    HostelNoticeBoard,
-    HostelInventory,
-    GuestRoom,
     GuestRoomBooking,
-    GuestRoomPolicy,
-    GuestRoomInspection,
-    LeaveStatusChoices,
     ComplaintStatusChoices,
     ComplaintCategoryChoices,
-    ComplaintPriorityChoices,
-    FineStatusChoices,
-    AccommodationApplicationWindow,
-    AccommodationRequest,
     RoomAllotment,
     Hostel,
     Room,
-    HostelTypeChoices,
-    RoomTypeChoices,
     StaffRoleChoices,
-    HostelStatusChoices,
     HostelStaffAssignment,
     HostelAuditLog,
-    ComplaintHistory,
-    AllocationChangeStatusChoices, FineCategoryChoices, FineExtraDetail,
-    InventoryItem, InventoryDiscrepancy, InventoryAuditLog as InventoryAuditTrail, ResourceRequest,
-    InventoryCategory, InventoryCondition, DiscrepancyType, ResourceRequestType, ResourceRequestStatus,
-    Notice, NoticeReadStatus, NoticeStatus, NoticePriority,
-    BookingStatusChoices, DamageSeverityChoices,
-    SecurityGuard, GuardShift, ShiftScheduleLog
+    SecurityGuard,
+    GuardShift,
+    ShiftScheduleLog
 )
 from . import serializers
 from .serializers import (
@@ -77,24 +59,21 @@ from .serializers import (
     HostelComplaintResolveSerializer, HostelComplaintEscalateSerializer,
     RoomAllocationChangeSerializer,
     RoomAllocationChangeApprovalSerializer,
-    HostelFineSerializer, HostelFinePaymentSerializer, HostelFineWaiverSerializer,
-    StaffScheduleSerializer, HostelInventorySerializer,
-    GuestRoomBookingSerializer, GuestRoomBookingCreateSerializer, GuestRoomBookingApprovalSerializer,
-    HostelNoticeBoardSerializer, NoticeSerializer, NoticeReadStatusSerializer,
-    StudentAttendanceRecordSerializer,
-    InventoryItemSerializer, InventoryInspectionSerializer, InventoryItemUpdateSerializer,
-    InventoryDiscrepancySerializer, InventoryAuditTrailSerializer,
-    ResourceRequestSerializer, ResourceRequestCreateSerializer, ResourceRequestReviewSerializer, BulkHostelVacationSerializer,
-    SecurityGuardSerializer, GuardShiftSerializer, ShiftScheduleLogSerializer
+    HostelFineSerializer, HostelFineWaiverSerializer, StaffScheduleSerializer,
+    NoticeSerializer,
+    StudentAttendanceRecordSerializer, InventoryItemSerializer, InventoryInspectionSerializer,
+    InventoryItemUpdateSerializer, InventoryDiscrepancySerializer, InventoryAuditTrailSerializer,
+    ResourceRequestSerializer,
+    ResourceRequestCreateSerializer, ResourceRequestReviewSerializer, BulkHostelVacationSerializer,
+    SecurityGuardSerializer, GuardShiftSerializer,
+    ShiftScheduleLogSerializer
 )
 from .. import selectors, services
 from ..permissions import IsHostelSuperAdmin, IsAssignedToHostel, IsWardenOrAdmin, HasActiveHostelAllotment, IsWarden
 from ..services import (
     HostelManagementException, LeaveEligibilityError, LeaveDateError,
-    ComplaintEligibilityError, ComplaintRoutingError, ResolutionRemarksError,
-    EscalationAuthorizationError, WardenAuthorityError,
     RoomChangeEligibilityError, DualApprovalError, AllotmentCapacityError,
-    FineValidationError, ApplicationWindowError
+    ApplicationWindowError
 )
 
 
@@ -156,13 +135,6 @@ class IsStudent(BasePermission):
 # ══════════════════════════════════════════════════════════════
 # FACULTY & STAFF LIST VIEWS
 # ══════════════════════════════════════════════════════════════
-
-
-
-# ══════════════════════════════════════════════════════════════
-# COMPLAINT MANAGEMENT VIEWS (HM-WF-102)
-# ══════════════════════════════════════════════════════════════
-
 
 class FacultyListView(generics.ListAPIView):
     """List all faculty members available for warden assignment."""
@@ -235,49 +207,6 @@ class ListRoomsByHostelView(generics.ListAPIView):
         return selectors.list_rooms_by_hostel(hostel_id)
 
 
-class RoomRenameView(generics.UpdateAPIView):
-    """Rename a room (Warden/Caretaker can rename rooms from sequential to custom names)."""
-    permission_classes = [IsWardenOrCaretaker]
-    serializer_class = serializers.RoomSetupSerializer
-
-    def get_object(self):
-        """Get room by ID."""
-        room_id = self.kwargs['pk']
-        return get_object_or_404(Room, pk=room_id)
-
-    def patch(self, request, *args, **kwargs):
-        """
-        Rename room.
-        Request body: { "room_number": "A101", "floor": 1 }
-        """
-        try:
-            room_id = self.kwargs['pk']
-            room = get_object_or_404(Room, pk=room_id)
-            room_number = request.data.get('room_number')
-            floor = request.data.get('floor')
-            
-            if not room_number:
-                return Response(
-                    {'error': 'room_number is required'},
-                    status=status.HTTP_400_BAD_REQUEST
-                )
-            
-            updated_room = services.rename_room_in_hostel(room, room_number, floor)
-            
-            return Response(
-                {'message': 'Room renamed successfully'},
-                status=status.HTTP_200_OK
-            )
-        except Exception as e:
-            return Response(
-                {'error': str(e)},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-
-
-# ══════════════════════════════════════════════════════════════
-# LEAVE MANAGEMENT VIEWS (HM-WF-101)
-# ══════════════════════════════════════════════════════════════
 
 class LeaveListCreateView(generics.ListCreateAPIView):
     """List leaves or submit a new leave request (BR-HM-101 to 103)."""
@@ -1268,31 +1197,6 @@ class StaffScheduleRetrieveUpdateDestroyView(generics.RetrieveUpdateDestroyAPIVi
 # INVENTORY MANAGEMENT VIEWS (HM-WF-108)
 # ══════════════════════════════════════════════════════════════
 
-class InventoryListCreateView(generics.ListCreateAPIView):
-    """List inventory items or add a new item."""
-    permission_classes = [IsAuthenticated]
-    serializer_class = HostelInventorySerializer
-
-    def get_queryset(self):
-        """Get all inventory items."""
-        return selectors.get_all_inventory()
-
-    def perform_create(self, serializer):
-        """Add legacy inventory item via service."""
-        services.add_inventory_item(
-            hall_id=serializer.validated_data['hostel'].id,
-            item_name=serializer.validated_data['item_name'],
-            quantity=serializer.validated_data['quantity'],
-            unit_cost=serializer.validated_data['unit_cost'],
-            remarks=serializer.validated_data.get('remarks')
-        )
-
-
-# ══════════════════════════════════════════════════════════════
-# MODERN INVENTORY VIEWS (HM-WF-108)
-# ══════════════════════════════════════════════════════════════
-from rest_framework import viewsets
-from rest_framework.decorators import action
 
 class InventoryItemViewSet(viewsets.ModelViewSet):
     """
@@ -1444,35 +1348,6 @@ class ResourceRequestViewSet(viewsets.ModelViewSet):
             return Response({'detail': str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
 
-class InventoryRetrieveUpdateView(generics.RetrieveUpdateAPIView):
-    """Retrieve or update inventory item."""
-    permission_classes = [IsAuthenticated]
-    serializer_class = HostelInventorySerializer
-
-    def get_object(self):
-        """Get inventory by ID."""
-        return get_object_or_404(HostelInventory, pk=self.kwargs['pk'])
-
-    def perform_update(self, serializer):
-        """Update inventory via service."""
-        inventory = self.get_object()
-        services.update_inventory(
-            inventory_id=inventory.id,
-            quantity=serializer.validated_data.get('quantity'),
-            remarks=serializer.validated_data.get('remarks')
-        )
-
-
-# ...existing code...
-
-
-# ══════════════════════════════════════════════════════════════
-# GUEST ROOM BOOKING VIEWS (HM-WF-112)
-# ══════════════════════════════════════════════════════════════
-
-# ══════════════════════════════════════════════════════════════
-# GUEST ROOM MANAGEMENT VIEWS (CHUNK 12)
-# ══════════════════════════════════════════════════════════════
 
 class GuestRoomPolicyView(generics.GenericAPIView):
     """Manage hostel-specific guest room policies."""
@@ -1761,7 +1636,7 @@ class NoticeHistoryView(generics.ListAPIView):
 # ══════════════════════════════════════════════════════════════
 
 from .serializers import RoomVacationRequestSerializer, ExtendedStayApplicationSerializer
-from ..selectors import list_room_vacations, get_room_vacation, list_extended_stays, get_extended_stay
+from ..selectors import list_room_vacations, list_extended_stays, get_extended_stay
 
 class RoomVacationListCreateView(generics.ListCreateAPIView):
     serializer_class = RoomVacationRequestSerializer
@@ -1999,13 +1874,12 @@ class StudentAttendanceStatsView(generics.RetrieveAPIView):
 # ══════════════════════════════════════════════════════════════
 
 from ..models import (
-    HostelAuditLog, StaffRoleChoices, HostelStatusChoices as HostelOpStatusChoices
+    HostelAuditLog, StaffRoleChoices as HostelOpStatusChoices
 )
 from ..permissions import IsHostelSuperAdmin, IsAssignedToHostel
 from .serializers import (
     HostelSetupSerializer, HostelCreateSerializer, HostelStatusSerializer,
-    StaffAssignmentSerializer, StaffAssignmentCreateSerializer,
-    HostelAuditLogSerializer
+    StaffAssignmentSerializer, StaffAssignmentCreateSerializer
 )
 
 
@@ -2349,3 +2223,6 @@ class BulkHostelVacationView(generics.GenericAPIView):
             }, status=status.HTTP_200_OK)
         except Exception as e:
             return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+
+
